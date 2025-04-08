@@ -1,15 +1,12 @@
 import sys
-
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget, QPushButton, 
                             QLabel, QDialog, QHBoxLayout, QLineEdit, QTextEdit, QSplitter,
                             QGraphicsView, QGraphicsScene, QGraphicsRectItem, QStatusBar,
                             QToolBar, QAction, QFileDialog, QMenu, QGraphicsLineItem, QStyle,
-                            QGraphicsItem)
+                            QGraphicsItem, QMessageBox)
 from PyQt5.QtGui import QIcon, QDrag, QPainter, QColor, QBrush, QFont, QPixmap, QPen
 from PyQt5.QtCore import Qt, QMimeData, QPoint, QPointF, QSize
-
 from functools import partial 
-
 import traceback
 import logging, json, uuid, pickle
 
@@ -226,10 +223,22 @@ class BPMNCanvas(QGraphicsView):
 class BPMNConnection(QGraphicsLineItem):
     def __init__(self, start_element, end_element):
         super().__init__()
-        self.setPen(QPen(Qt.darkGray, 2, Qt.DashLine))
+        self.unique_id = uuid.uuid4().hex  # ← Adicionar ID único
         self.start_element = start_element
         self.end_element = end_element
         self.update_position()
+
+    def __getstate__(self):
+        return {
+            'id': self.unique_id,
+            'start_id': self.start_element.unique_id,
+            'end_id': self.end_element.unique_id
+        }
+
+    def __setstate__(self, state):
+        self.unique_id = state['id']
+        self.start_element = None  # Será definido no carregamento
+        self.end_element = None    # Será definido no carregamento
 
     def serialize(self):
         return {
@@ -253,7 +262,7 @@ class BPMNPalette(QWidget):
     def init_ui(self):
         layout = QVBoxLayout()
         self.setLayout(layout)
-        
+
         elements = [
             ('Evento Início', 'start', '#start_event'),
             ('Tarefa', 'task', '#task'),
@@ -266,7 +275,8 @@ class BPMNPalette(QWidget):
             btn.setIcon(self.style().standardIcon(QStyle.SP_DialogOpenButton))
             btn.setFocusPolicy(Qt.NoFocus) 
             layout.addWidget(btn)
-            
+                
+        # print("Paleta visível?", self.palette.isVisible())  # Deve ser True
         layout.addStretch()
 
     def mouse_press(self, event, element_type):
@@ -411,23 +421,31 @@ class BPMNEditor(QMainWindow):
     def __init__(self):
         super().__init__()
         self.canvas = BPMNCanvas()
-        self.properties = PropertiesPanel(self)
+        self.palette = BPMNPalette(self.canvas)
+        self.palette.editor_ref = self 
+        self.canvas.editor_ref = self 
+        self.properties = PropertiesPanel()
         
-        # Primeiro criar todas as ações
-        self.create_actions()  # ← Método modificado
+        # 1. Criar todas as ações primeiro
+        self.create_actions()
         
-        # Depois configurar a UI que depende das ações
+        # 2. Configurar interface
         self.init_ui()
+        
         self.setWindowTitle("Editor BPMN")
         self.setGeometry(100, 100, 1200, 800)
+        self.show()
 
     def create_actions(self):
-        """Configura todas as ações centralizadas"""
-        # Ações de Arquivo
-        self.new_action = QAction("Novo", self)
-        self.open_action = QAction("Abrir...", self)
-        self.save_action = QAction("Salvar", self)
+        self.new_action = QAction("&Novo", self)
+        self.new_action.triggered.connect(self.new_file)  # Conectar ao método existente
         
+        self.open_action = QAction("&Abrir...", self)
+        self.open_action.triggered.connect(self.open_file)
+        
+        self.save_action = QAction("&Salvar", self)
+        self.save_action.triggered.connect(self.save)
+       
         # Ações de Zoom
         self.zoom_in_action = QAction("Zoom +", self)
         self.zoom_in_action.setShortcut("Ctrl++")
@@ -437,9 +455,28 @@ class BPMNEditor(QMainWindow):
         self.zoom_out_action.setShortcut("Ctrl+-")
         self.zoom_out_action.triggered.connect(self.zoom_out)
 
-
     def init_ui(self):
-        """Configura elementos visuais que usam ações"""
+        # Painel Lateral (Paleta de Elementos)
+        palette = QWidget()
+        palette.setFixedWidth(150)
+        palette_layout = QVBoxLayout(palette)
+        
+        # Botões de Elementos BPMN
+        element_types = ['start', 'task', 'gateway']
+        for elem in element_types:
+            btn = DragButton(elem, self)
+            btn.setText(elem.capitalize())
+            palette_layout.addWidget(btn)
+        
+        # Layout Principal
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(self.palette)
+        splitter.addWidget(self.canvas)
+        splitter.addWidget(self.properties)
+        splitter.setSizes([200, 600, 200])  # Definir proporções iniciais
+        self.setCentralWidget(splitter)
+
         # Toolbar Principal
         toolbar = self.addToolBar("Principal")
         toolbar.addAction(self.new_action)
@@ -449,69 +486,27 @@ class BPMNEditor(QMainWindow):
         toolbar.addAction(self.zoom_in_action)
         toolbar.addAction(self.zoom_out_action)
         
+        self.create_actions()
+        self.init_menus()
+        
+        print("Inicializando UI...")
+        print("Número de widgets no splitter:", splitter.count())  # Deve ser 3
+        print("Menu bar visível?", self.menuBar().isVisible())  # Deve ser True
+
+        # Status Bar
+        self.statusBar().showMessage("Pronto")
+
+    def init_menus(self):
+        # Menu Arquivo
+        file_menu = self.menuBar().addMenu("&Arquivo")
+        file_menu.addAction(self.new_action)
+        file_menu.addAction(self.open_action)
+        file_menu.addAction(self.save_action)
+        
         # Menu Ver
         view_menu = self.menuBar().addMenu("&Ver")
         view_menu.addAction(self.zoom_in_action)
         view_menu.addAction(self.zoom_out_action)
-        
-        # ... (restante do layout)        self.setWindowTitle("Editor BPMN")
-        self.setGeometry(100, 100, 1200, 800)
-        self.setWindowIcon(QIcon('#icon'))
-
-        # Componentes principais
-        self.canvas = BPMNCanvas()
-        self.canvas.editor_ref = self  # Passar referência
-        self.palette = BPMNPalette(self.canvas)
-        self.properties = PropertiesWindow()
-
-        # Layout
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(self.palette)
-        splitter.addWidget(self.canvas)
-        splitter.addWidget(self.properties)
-        splitter.setSizes([200, 600, 200])
-
-        # Barra de menus
-        menu_bar = self.menuBar()
-        
-        # Menu Arquivo
-        # file_menu = menu_bar.addMenu("Arquivo")
-        # file_menu.addAction(self.new_action)  # ← Usar ação já criada
-        # file_menu.addAction(self.open_action)
-        # file_menu.addAction(self.save_action)
-        # file_menu.addSeparator()
-#        file_menu.addAction(self.create_actions("Sair", "#exit", self.close))
-
-        # Menu Editar
-        edit_menu = menu_bar.addMenu("Editar")
-        edit_menu.addAction(self.delete_action)
-        edit_menu.addAction(self.open_action)
-
-        # Menu Visualizar
-        # view_menu = menu_bar.addMenu("Visualizar")
-        # view_menu.addAction(self.zoom_in_action)
-        # view_menu.addAction(self.zoom_out_action)
-        # view_menu.addAction(self.create_actions("Resetar Zoom", "#zoom_reset", self.zoom_reset))
-
-        # Barra de ferramentas
-        toolbar = QToolBar()
-        self.addToolBar(toolbar)
-        
-        # actions = [
-        #     ('Novo', '#new', self.new_diagram),
-        #     ('Abrir', '#open', self.load_project),
-        #     ('Salvar', '#save', self.save_project),
-        #     ('Exportar', '#export', self.export_image),
-        #     ('Deletar', '#delete', self.delete_element)
-        # ]
-        
-        # for text, icon, callback in actions:
-        #     action = self.create_actions(text, icon, callback)
-        #     toolbar.addAction(action)
-
-        self.statusBar().showMessage('Pronto')
-        self.canvas.scene.selectionChanged.connect(self.on_element_selected)
-        self.setCentralWidget(splitter)
 
     def create_actions(self):
         # Ação Novo Diagrama
@@ -632,30 +627,30 @@ class BPMNEditor(QMainWindow):
             except Exception as e:
                 self.statusBar().showMessage(f'Erro ao abrir: {str(e)}')
 
-        # if file_name:  # abre um arquivo txt comum
-        #     try:
-        #         self.canvas.scene.clear()
-        #         with open(file_name, 'r') as f:
-        #             lines = f.readlines()
-        #             for line in lines[1:]:  # Ignora header
-        #                 parts = line.strip().split('|')
-        #                 if len(parts) >= 3:
-        #                     element = self.canvas.add_element(parts[0], QPoint(0, 0))
-        #                     element.name = parts[1]
-        #                     element.description = parts[2]
-        #         self.statusBar().showMessage(f'Diagrama carregado: {file_name}')
-        #         self.current_file = file_name
-        #     except Exception as e:
-        #         self.statusBar().showMessage(f'Erro ao abrir: {str(e)}')
+    def new_file(self):
+        self.canvas.scene.clear()
+        self.statusBar().showMessage("Novo arquivo criado")
 
-    def open_diagram(self):
-        options = QFileDialog.Options()
-        file_name, _ = QFileDialog.getOpenFileName(
-            self, "Abrir Diagrama", "", "BPMN Files (*.bpmn);;All Files (*)", options=options)
-        
-        if file_name:
-            # Implementar lógica de carregamento
-            self.statusBar().showMessage(f'Diagrama carregado: {file_name}')
+    def open_file(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Abrir Diagrama", "", "BPMN Files (*.bpmn)"
+        )
+        if filename:
+            try:
+                with open(filename, 'rb') as f:
+                    data = pickle.load(f)
+                    self.canvas.load_elements(data)
+            except Exception as e:
+                QMessageBox.critical(self, "Erro", f"Erro ao abrir arquivo:\n{str(e)}")
+
+    def save(self):
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Salvar Diagrama", "", "BPMN Files (*.bpmn)"
+        )
+        if filename:
+            data = {'elements': [e.__getstate__() for e in self.canvas.elements]}
+            with open(filename, 'wb') as f:
+                pickle.dump(data, f)
 
     def export_image(self):
         options = QFileDialog.Options()
@@ -667,40 +662,59 @@ class BPMNEditor(QMainWindow):
             self.statusBar().showMessage(f'Imagem exportada: {file_name}')
 
     def save_project(self):
-        filename, _ = QFileDialog.getSaveFileName(
-            self, 
-            "Salvar Diagrama BPMN", 
-            "", 
-            "BPMN Files (*.bpmn)"
-        )
-        
-        if filename:
-            # Coletar dados dos elementos
-            elements_data = {
-                'version': 1.0,
-                'elements': [elem.__getstate__() for elem in self.canvas.elements],
-                'connections': [
-                    {
-                        'start_id': conn.start_element.unique_id,
-                        'end_id': conn.end_element.unique_id
-                    } 
-                    for conn in self.canvas.scene.items() 
-                    if isinstance(conn, BPMNConnection)
-                ]
-            }
-            
-            # Serializar com Pickle
-            with open(filename, 'wb') as f:
-                pickle.dump(elements_data, f)
-            
-            self.statusBar().showMessage(f"Projeto salvo em: {filename}", 3000)
+        try:
+            path, _ = QFileDialog.getSaveFileName(self, "Salvar Projeto", "", "BPMN Files (*.bpmn)")
+            if path:
+                # Coletar dados de elementos e conexões
+                elements_data = [elem.__getstate__() for elem in self.canvas.elements]
+                connections = [item for item in self.canvas.scene.items() if isinstance(item, BPMNConnection)]
+                connections_data = [conn.__getstate__() for conn in connections]
+                
+                data = {
+                    'elements': elements_data,
+                    'connections': connections_data
+                }
+                
+                with open(path, 'wb') as f:
+                    pickle.dump(data, f)
 
-    def load_project(self):  # ← IMPLEMENTAR
-        filename, _ = QFileDialog.getOpenFileName(self, "Abrir Projeto", "", "BPMN Files (*.bpmn)")
-        if filename:
-            with open(filename, 'rb') as f:
-                data = pickle.load(f)  # ← Dispara __setstate__
-            self.canvas.load_elements(data)
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Falha ao salvar: {str(e)}")
+
+    def load_project(self):
+        try:
+            path, _ = QFileDialog.getOpenFileName(self, "Abrir Projeto", "", "BPMN Files (*.bpmn)")
+            if path:
+                with open(path, 'rb') as f:
+                    data = pickle.load(f)
+
+                # Limpar cena atual
+                self.canvas.scene.clear()
+                self.canvas.elements = []
+                
+                # Passo 1: Recriar elementos
+                elements_map = {}
+                for elem_data in data['elements']:
+                    element = self.canvas.add_element(
+                        elem_data['type'], 
+                        QPointF(elem_data['pos'][0], elem_data['pos'][1])
+                    )
+                    element.unique_id = elem_data['id']  # Garantir ID original
+                    element.name = elem_data['name']
+                    elements_map[elem_data['id']] = element
+                
+                # Passo 2: Reconectar
+                for conn_data in data['connections']:
+                    start = elements_map.get(conn_data['start_id'])
+                    end = elements_map.get(conn_data['end_id'])
+                    if start and end:
+                        self.canvas.create_connection(start, end)
+                    else:
+                        logging.error(f"Conexão inválida: {conn_data}")
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Falha ao carregar: {str(e)}")
+            logging.error("Erro durante o carregamento:", exc_info=True)
 
     def delete_element(self):
         selected = self.canvas.scene.selectedItems()
@@ -716,13 +730,9 @@ class BPMNEditor(QMainWindow):
 # Adicione no final do arquivo:
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")  # Estilo visual moderno
     window = BPMNEditor()
-    
-    # Teste de fluxo
-    canvas = window.canvas
-    element1 = canvas.add_element('start', QPointF(50, 50))
-    element2 = canvas.add_element('task', QPointF(200, 50))
-    canvas.create_connection(element1, element2)
-    
+    window.resize(1200, 800)  # Tamanho inicial adequado
     window.show()
     sys.exit(app.exec_())
+
