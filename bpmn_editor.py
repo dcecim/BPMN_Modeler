@@ -204,6 +204,10 @@ class BPMNElement(QGraphicsRectItem):
         if connection not in self.connections:
             self.connections.append(connection)
 
+    def remove_connection(self, connection):
+        if connection in self.connections:
+            self.connections.remove(connection)
+
 class BPMNCanvas(QGraphicsView):
     def __init__(self):
         super().__init__()
@@ -386,6 +390,37 @@ class BPMNCanvas(QGraphicsView):
                 QMessageBox.warning(self, "Erro", "Selecione exatamente 2 elementos para conectar.")
         
         super().mouseReleaseEvent(event)
+
+    def delete_selected_elements(self):
+        try:
+            # Obter todos os itens selecionados
+            selected_items = self.scene.selectedItems()
+            
+            for item in selected_items:
+                logging.debug(f"Removendo elemento {item.unique_id}")  # ← Log de debug
+                # Remover conexões associadas
+                if isinstance(item, BPMNElement):
+                    # Remover conexões onde o elemento é origem ou destino
+                    for conn in item.connections[:]:  # Iterar cópia da lista
+                        conn.source.remove_connection(conn)
+                        conn.target.remove_connection(conn)
+                        self.scene.removeItem(conn)
+                    
+                    # Remover da lista de elementos
+                    if item in self.elements:
+                        self.elements.remove(item)
+                        
+                # Remover da cena
+                self.scene.removeItem(item)
+            
+            self.scene.update()
+            if self.editor_ref:  # ← Fechar propriedades
+                self.editor_ref.properties.hide()
+                
+            logging.info(f"{len(selected_items)} elementos removidos")
+            
+        except Exception as e:
+            logging.error(f"Erro ao remover elementos: {str(e)}")
 
 class BPMNConnection(QGraphicsLineItem):
     def __init__(self, source, target):
@@ -642,6 +677,15 @@ class BPMNEditor(QMainWindow):
         save_action.setShortcut("Ctrl+S")
         save_action.triggered.connect(self.save_project)
         file_menu.addAction(save_action)
+
+        # Toolbar
+        self.toolbar = self.addToolBar("Ferramentas")
+        
+        # Ação de Remoção (novo)
+        delete_action = QAction(QIcon(), "Remover Elemento", self)
+        delete_action.setShortcut(Qt.Key_Delete)  # Atalho: Tecla Delete
+        delete_action.triggered.connect(self.delete_selected)
+        self.toolbar.addAction(delete_action)
 
     def create_actions(self):
         self.new_action = QAction("&Novo", self)
@@ -1037,6 +1081,11 @@ class BPMNEditor(QMainWindow):
                 self.statusBar().showMessage(f"Modelo carregado: {filename}", 5000)
             except Exception as e:
                 QMessageBox.critical(self, "Erro", f"Falha ao carregar:\n{str(e)}")
+
+    def delete_selected(self):
+        if hasattr(self, 'canvas'):
+            self.canvas.delete_selected_elements()
+
 
 # Adicione no final do arquivo:
 if __name__ == "__main__":
