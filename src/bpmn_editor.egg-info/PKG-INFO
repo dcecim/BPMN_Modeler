@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: bpmn_editor
+Version: 0.1.0
+Summary: Editor BPMN com PyQt5
+Author: Divino Cecim da Silva
+Requires-Python: >=3.8
+Requires-Dist: PyQt5>=5.15.4
+Requires-Dist: setuptools>=62.0.0
+Requires-Dist: sqlalchemy>=2.0.40
+Dynamic: author
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

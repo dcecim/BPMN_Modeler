@@ -1,0 +1,18 @@
+bpmn_editor/
+├── __init__.py
+├── main.py               # Ponto de entrada
+├── logging_config.py     # Configurações do log
+├── models/               # Classes de dados
+│   ├── elements.py       # BPMNElement, BPMNConnection
+│   └── grid.py           # GridScene
+├── views/                # Componentes visuais
+│   ├── canvas.py         # BPMNCanvas
+│   └── toolbar.py        # DragButton (se reutilizado)
+└── utils/                # Utilitários
+    └── exceptions.py     # excepthook
+
+⚠️ Classes que Devem Permanecer Juntas
+Classe	                Motivo	                    Arquivo Sugerido
+BPMNEditorApp	Core da aplicação e inicialização	main.py
+BPMNCanvas	    Dependência direta do editor	    main.py ou canvas.py
+DragButton	    Uso específico na toolbar	        toolbar.py

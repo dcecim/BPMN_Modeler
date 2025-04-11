@@ -1,0 +1,17 @@
+setup.py
+src/bpmn_editor/__init__.py
+src/bpmn_editor/main.py
+src/bpmn_editor.egg-info/PKG-INFO
+src/bpmn_editor.egg-info/SOURCES.txt
+src/bpmn_editor.egg-info/dependency_links.txt
+src/bpmn_editor.egg-info/requires.txt
+src/bpmn_editor.egg-info/top_level.txt
+src/bpmn_editor/models/__init__.py
+src/bpmn_editor/models/elements.py
+src/bpmn_editor/models/grid.py
+src/bpmn_editor/utils/__init__.py
+src/bpmn_editor/utils/exceptions.py
+src/bpmn_editor/views/__init__.py
+src/bpmn_editor/views/canvas.py
+src/bpmn_editor/views/properties.py
+src/bpmn_editor/views/toolbar.py

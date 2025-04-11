@@ -8,11 +8,14 @@ from PyQt5.QtGui import (QIcon, QDrag, QPainter, QColor, QBrush, QCursor,
                          QFont, QPixmap, QPen, QPolygonF, QPainterPath, QKeySequence)
 from PyQt5.QtCore import (Qt, QMimeData, QPoint, QPointF, QSize, 
                           QRectF, QLineF, QTimer)
+
 from functools import partial 
+from weakref import ref
+from datetime import datetime
+
 import traceback
 import logging, json, uuid, pickle
 import locale
-from weakref import ref
 
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')  # Forçar locale compatível
 sys.stdout.reconfigure(encoding='utf-8')  # Configurar saída padrão
