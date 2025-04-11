@@ -4,16 +4,25 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget, QP
                             QGraphicsView, QGraphicsScene, QGraphicsRectItem, QStatusBar,
                             QToolBar, QAction, QFileDialog, QMenu, QGraphicsLineItem, QStyle,
                             QGraphicsItem, QMessageBox)
-from PyQt5.QtGui import QIcon, QDrag, QPainter, QColor, QBrush, QFont, QPixmap, QPen
-from PyQt5.QtCore import Qt, QMimeData, QPoint, QPointF, QSize
+from PyQt5.QtGui import (QIcon, QDrag, QPainter, QColor, QBrush, QCursor,
+                         QFont, QPixmap, QPen, QPolygonF, QPainterPath)
+from PyQt5.QtCore import (Qt, QMimeData, QPoint, QPointF, QSize, 
+                          QRectF, QLineF, QTimer)
 from functools import partial 
 import traceback
 import logging, json, uuid, pickle
+import locale
+
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')  # Forçar locale compatível
+sys.stdout.reconfigure(encoding='utf-8')  # Configurar saída padrão
 
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.FileHandler('debug.log'), logging.StreamHandler()]
+    level=logging.INFO,
+    format='%(asctime)s - %(message)s',
+    handlers=[
+        logging.FileHandler('app.log', encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 
 def excepthook(exc_type, exc_value, exc_traceback):
@@ -25,15 +34,37 @@ class DragButton(QPushButton):
         super().__init__(parent)
         self.element_type = element_type
         self.setFixedSize(120, 40)
-        
+        self.drag_start_position = QPoint()  # Adicionado
+
+    # Remova todos os handlers de mouseMove/mouseRelease (estão no lugar errado)
     def mousePressEvent(self, event):
-        self.parent().mouse_press(event, self.element_type)
-        
+        if event.button() == Qt.LeftButton:
+            self.drag_start_position = event.pos()
+
     def mouseMoveEvent(self, event):
-        self.parent().mouse_move(event)
+        if (event.buttons() == Qt.LeftButton and 
+            (event.pos() - self.drag_start_position).manhattanLength() > 5):
+            
+            drag = QDrag(self)
+            mime_data = QMimeData()
+            mime_data.setData("application/x-bpmn-element", self.element_type.encode())
+            drag.setMimeData(mime_data)
+            
+            # Configurar visualização do drag
+            pixmap = QPixmap(100, 60)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            painter.setBrush(QColor('#2196F3' if self.element_type == 'task' else '#4CAF50'))
+            painter.drawRoundedRect(0, 0, 100, 60, 10, 10)
+            painter.end()
+            drag.setPixmap(pixmap)
+            drag.setHotSpot(QPoint(50, 30))
+            
+            drag.exec_(Qt.CopyAction)
+      
 class BPMNElement(QGraphicsRectItem):
     def __init__(self, element_type, pos):
-        super().__init__(0, 0, 100, 80)
+        super().__init__()
         self.unique_id = uuid.uuid4().hex  # Gerar ID único
         self.setData(0, self.unique_id)   # Armazenar no item
         self.connections = []  # Lista de conexões
@@ -42,9 +73,13 @@ class BPMNElement(QGraphicsRectItem):
         self.description = ""
         self.setPos(pos)
         self.setBrush(QBrush(self.get_color()))
-        self.setFlags(QGraphicsRectItem.ItemIsMovable | 
-                    QGraphicsRectItem.ItemIsSelectable |
-                    QGraphicsRectItem.ItemSendsGeometryChanges)
+        self.setFlags(QGraphicsItem.ItemIsMovable | 
+                    QGraphicsItem.ItemIsSelectable |
+                    QGraphicsItem.ItemSendsGeometryChanges |
+                    QGraphicsItem.ItemSendsScenePositionChanges)
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        
 
     def serialize(self):
         print(f"Serializando elemento {id(self)}: {self.serialize()}")
@@ -62,7 +97,8 @@ class BPMNElement(QGraphicsRectItem):
             'type': self.element_type,
             'pos': (self.x(), self.y()),
             'name': self.name,
-            'connections': [c.unique_id for c in self.connections]
+            'connections': [c.unique_id for c in self.connections 
+                        if isinstance(c, BPMNConnection)]
         }
         print(f"[SERIALIZAÇÃO] Elemento {self.unique_id}")
         return state
@@ -85,11 +121,58 @@ class BPMNElement(QGraphicsRectItem):
             'gateway': QColor('#FF9800')
         }
         return colors.get(self.element_type, QColor('#607D8B'))
-
+    
+    def boundingRect(self):
+        # if self.element_type == 'gateway':
+        #     return QRectF(-10, -10, 100, 70)  # Aumentar área para o losango
+        return QRectF(-10, -10, 120, 100)  # Margem extra
+    
+    def shape(self):
+        path = QPainterPath()
+        if self.element_type == 'start':
+            path.addEllipse(25, 10, 50, 50)
+        elif self.element_type == 'gateway':
+            diamond = QPolygonF([QPointF(50,0), QPointF(100,35), QPointF(50,70), QPointF(0,35)])
+            path.addPolygon(diamond)
+        else:
+            path.addRoundedRect(0, 0, 100, 60, 10, 10)
+        return path
+    
     def paint(self, painter, option, widget):
-        painter.setFont(QFont("Arial", 10))  
-        super().paint(painter, option, widget)
-        painter.drawText(self.rect(), Qt.AlignCenter, self.name)
+        # Destacar seleção
+        if self.isSelected():
+            painter.setPen(QPen(Qt.yellow, 3))
+        else:
+            painter.setPen(QPen(Qt.black, 1))
+
+        painter.setPen(QPen(Qt.black if self.isSelected() else Qt.gray, 2))
+        # Desenha ícone de conexão quando selecionado
+        if self.isSelected():
+            painter.drawEllipse(self.boundingRect().topRight(), 5, 5)
+
+        painter.setBrush(self.get_color())
+        
+        # Formas específicas por tipo
+        if self.element_type == 'start':
+            # Círculo para evento de início
+            painter.drawEllipse(25, 10, 50, 50)
+            painter.drawText(QRectF(0, 60, 100, 20), Qt.AlignCenter, self.name)
+            
+        elif self.element_type == 'gateway':
+            # Losango para gateway
+            diamond = QPolygonF([
+                QPointF(50, 0), 
+                QPointF(100, 35),
+                QPointF(50, 70),
+                QPointF(0, 35)
+            ])
+            painter.drawPolygon(diamond)
+            painter.drawText(QRectF(0, 70, 100, 20), Qt.AlignCenter, self.name)
+            
+        else:  # Tarefas
+            # Retângulo com cantos arredondados
+            painter.drawRoundedRect(0, 0, 100, 60, 10, 10)
+            painter.drawText(QRectF(0, 60, 100, 20), Qt.AlignCenter, self.name)
 
     # Adicionar na classe BPMNElement:
     def set_editor_reference(self, editor_ref):
@@ -102,10 +185,24 @@ class BPMNElement(QGraphicsRectItem):
             self.editor_ref.properties.show()
 
     def itemChange(self, change, value):
-        if change == QGraphicsItem.ItemPositionHasChanged:
-            for connection in self.connections:
-                connection.update_position()
+        if change == QGraphicsItem.ItemPositionChange:
+            # Atualizar conexões ao mover
+            for conn in self.connections:
+                conn.update_position()
+        # print("Itens selecionados:", [item.unique_id for item in self.selected_elements])
         return super().itemChange(change, value)
+    
+    def mouseMoveEvent(self, event):
+        # Forçar atualização em tempo real
+        super().mouseMoveEvent(event)
+        if self.isSelected():
+            for conn in self.connections:
+                conn.update_position()
+            self.scene().update()
+
+    def add_connection(self, connection):
+        if connection not in self.connections:
+            self.connections.append(connection)
 
 class BPMNCanvas(QGraphicsView):
     def __init__(self):
@@ -122,93 +219,123 @@ class BPMNCanvas(QGraphicsView):
         self.editor_ref = None  # Inicializar atributo
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
+        self.drag_start_position = QPoint()
+        self.connection_source = None
+        self.temp_connection = None        
+        self.selected_elements = []  # Nova lista de seleção
+        self.setDragMode(QGraphicsView.RubberBandDrag)  # Já existe no código
+        self.setRubberBandSelectionMode(Qt.ContainsItemBoundingRect)  # ← Nova linha
         print("Elementos na cena:", self.scene.items())  # Deve mostrar os elementos adicionados
 
     def add_element(self, element_type, pos):
+        # Garantir que o tipo seja 'gateway' (não 'getway' ou variações)
+        valid_types = ['start', 'task', 'gateway']  # ← Nomes padronizados
+        if element_type not in valid_types:
+            raise ValueError(f"Tipo inválido: {element_type}")
+        
         element = BPMNElement(element_type, pos)
         element.set_editor_reference(self.editor_ref)  # Nova linha
+        element.setPos(pos)  # ← Garantir posicionamento correto
         self.scene.addItem(element)
         self.elements.append(element)
         return element
 
     def load_elements(self, data):
-        # Primeira passada: cria elementos
+        # Fase 1: Criar elementos
         elements_map = {}
-        for element_data in data['elements']:
-            print(f"Elemento carregado na posição: {element.pos().x()}, {element.pos().y()}")
+        for elem_data in data['elements']:
             element = self.add_element(
-                element_data['type'], 
-                QPointF(element_data['x'], element_data['y'])
+                elem_data['type'], 
+                QPointF(elem_data['x'], elem_data['y'])
             )
-            element.name = element_data['name']
-            elements_map[element_data['id']] = element
+            element.name = elem_data['name']
+            elements_map[elem_data['id']] = element
         
-        # Segunda passada: reconecta
-        for connection_data in data['connections']:
-            start = elements_map[connection_data['start_id']]
-            end = elements_map[connection_data['end_id']]
-            self.create_connection(start, end)
+        # Fase 2: Criar conexões
+        for conn_data in data['connections']:
+            try:
+                start = elements_map[conn_data['start_id']]
+                end = elements_map[conn_data['end_id']]
+                self.create_connection(start, end)  # ← Usar método correto
+            except KeyError as e:
+                print(f"Erro na conexão: elemento {e} não encontrado")
 
     def dragEnterEvent(self, event):
-        print(f"MIME Types recebidos: {event.mimeData().formats()}")  # Deve mostrar "application/x-bpmn-element"
         if event.mimeData().hasFormat("application/x-bpmn-element"):
-            event.accept()  # ← Mudado para accept() em vez de acceptProposedAction()
-            print("Drag ENTER aceito!")
-            print("Drag accepted?", event.isAccepted())  # Deve ser True
-        else:
-            event.ignore()
-        print("Formatos MIME disponíveis:", event.mimeData().formats())  # No dragEnterEvent
+            event.acceptProposedAction()
 
     def dropEvent(self, event):
-        try:
-            print("[DEBUG] Drop event iniciado")  # ← Verificar se o evento é chamado
-            viewport_pos = event.pos()
-            pos = self.mapToScene(viewport_pos)
-            print(f"Posição calculada: X={pos.x():.1f}, Y={pos.y():.1f}")
-        # ... restante do código
-            pos = self.mapToScene(viewport_pos)
-            print(f"DROP em: {pos.x():.1f}, {pos.y():.1f}")  # ← Debug garantido
-            
-            element_type = bytes(event.mimeData().data("application/x-bpmn-element")).decode()
-            self.add_element(element_type, pos)
-            event.acceptProposedAction()
-            self.scene.update()  
-            self.viewport().update()  # Atualizar visualização
-            
-        except Exception as e:
-            print(f"ERRO NO DROP: {str(e)}")
-            traceback.print_exc()
+        # Correção crucial:
+        mime_data = event.mimeData()
+        element_type = bytes(mime_data.data("application/x-bpmn-element")).decode('utf-8')
+        
+        pos = self.mapToScene(event.pos())
+        self.add_element(element_type, pos)
+        event.acceptProposedAction()
+        # self.viewport().update()
 
 
     def contextMenuEvent(self, event):
-        # Obter itens selecionados
-        selected_items = self.scene.selectedItems()  # ← Corrigir aqui
+        scene_pos = self.mapToScene(event.pos())
+        items = [item for item in self.scene.items(scene_pos) if isinstance(item, BPMNElement)]
         
-        # Criar menu
-        menu = QMenu()
-        
-        if len(selected_items) == 2:
-            # Verificar se são elementos BPMN (não conexões)
-            if all(isinstance(item, BPMNElement) for item in selected_items):
-                connect_action = menu.addAction("Conectar elementos")
-                connect_action.triggered.connect(
-                    lambda: self.create_connection(selected_items[0], selected_items[1])
-                )
-        
-        menu.exec_(event.globalPos())
-        
-        # Limpar seleção após uso (opcional)
-        for item in selected_items:
-            item.setSelected(False)
-        self.scene.update()
+        if len(items) == 1:
+            # Menu para elemento único
+            menu = QMenu()
+            connect_action = menu.addAction("🔄 Conectar a...")
+            connect_action.triggered.connect(
+                lambda: self.initiate_connection_mode(items[0])
+            )
+            menu.exec_(event.globalPos())
 
+    def initiate_connection_mode(self, source_element):
+        # self.connection_source = source_element
+        self.setDragMode(QGraphicsView.NoDrag)
+        self.viewport().setCursor(Qt.CrossCursor)
         
+        # Conexão temporária visual
+        self.temp_connection = QGraphicsLineItem(QLineF(
+            source_element.sceneBoundingRect().center(),
+            self.mapToScene(self.viewport().mapFromGlobal(QCursor.pos()))
+        ))
+        self.temp_connection.setPen(QPen(Qt.gray, 2, Qt.DashLine))
+        self.scene.addItem(self.temp_connection)
+        
+        # Monitorar movimento do mouse
+        self.mouseMoveEvent = self.connection_mouse_move
+        self.mousePressEvent = self.connection_mouse_press
+
+    def connection_mouse_move(self, event):
+        end_pos = self.mapToScene(event.pos())
+        line = QLineF(
+            self.connection_source.sceneBoundingRect().center(),
+            end_pos
+        )
+        self.temp_connection.setLine(line)
+
+    def connection_mouse_press(self, event):
+        if event.button() == Qt.LeftButton:
+            item = self.itemAt(event.pos())
+            if isinstance(item, BPMNElement) and item != self.connection_source:
+                self.create_connection(self.connection_source, item)
+        self.cleanup_connection_mode()
+
+    def cleanup_connection_mode(self):
+        self.scene.removeItem(self.temp_connection)
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+        self.viewport().unsetCursor()
+        self.mouseMoveEvent = super().mouseMoveEvent
+        self.mousePressEvent = super().mousePressEvent
+
     def create_connection(self, source, target):
-        connection = BPMNConnection(source, target)
-        self.scene.addItem(connection)
-        source.connections.append(connection)
-        target.connections.append(connection)
-        print(f"Conexão: {source.name} → {target.name} | Total: {len(self.scene.items())} itens")
+        # Validação crítica
+        if (isinstance(source, BPMNElement) and 
+            isinstance(target, BPMNElement) and 
+            source != target):
+            
+            connection = BPMNConnection(source, target)
+            self.scene.addItem(connection)
+            logging.info(f"Conexão criada: {source.unique_id} -> {target.unique_id}")
         
 
     def dragMoveEvent(self, event):
@@ -220,36 +347,102 @@ class BPMNCanvas(QGraphicsView):
         
         print("Tipo de origem do drag:", event.source())  # Deve apontar para a BPMNPalette
 
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat("application/x-bpmn-element"):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        element_type = event.mimeData().data("application/x-bpmn-element").data().decode()
+        pos = self.mapToScene(event.pos())
+        self.add_element(element_type, pos)
+        event.acceptProposedAction()
+
+    def mousePressEvent(self, event):
+        # Limpar seleção apenas ao clicar em área vazia
+        if event.button() == Qt.LeftButton:
+            item = self.itemAt(event.pos())
+            if not item:  # Só limpa se clicar fora dos elementos
+                self.scene.clearSelection()
+        
+        super().mousePressEvent(event)
+
+
+    def mouseMoveEvent(self, event):
+        if self.temp_connection:
+            end_pos = self.mapToScene(event.pos())
+            self.temp_connection.end_pos = end_pos
+            self.temp_connection.update_position()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.RightButton:
+            # Verificar se há exatamente 2 elementos selecionados
+            selected_items = [item for item in self.scene.selectedItems() if isinstance(item, BPMNElement)]
+            
+            if len(selected_items) == 2:
+                source, target = selected_items
+                self.create_connection(source, target)
+            else:
+                QMessageBox.warning(self, "Erro", "Selecione exatamente 2 elementos para conectar.")
+        
+        super().mouseReleaseEvent(event)
+
 class BPMNConnection(QGraphicsLineItem):
-    def __init__(self, start_element, end_element):
+    def __init__(self, source, target):
         super().__init__()
-        self.unique_id = uuid.uuid4().hex  # ← Adicionar ID único
-        self.start_element = start_element
-        self.end_element = end_element
+        self.unique_id = uuid.uuid4().hex  # ← ID único para conexão
+        self.source = source  # ← Inicialização obrigatória
+        self.target = target  # ← Antes de qualquer uso
+
+        # Garantir referências bidirecionais
+        source.connections.append(self)
+        target.connections.append(self)
+
+        # Configurações de serialização
+        self.setData(0, self.unique_id)  # Armazenar ID no item
+        self.setFlags(QGraphicsItem.ItemIsSelectable)
+        
+        # Configurações visuais
+        self.setPen(QPen(Qt.darkGray, 2, Qt.SolidLine, Qt.RoundCap))
+        self.setZValue(-1)  # Ficar atrás dos elementos
+        
+        # Conexão bidirecional
+        self.source.add_connection(self)
+        self.target.add_connection(self)
         self.update_position()
+        # DEBUG:
+        print(f"[DEBUG] Conexão {self.unique_id} criada com:")  # ASCII seguro
+        print(f"  Source: {self.source.unique_id if self.source else 'None'}")
+        print(f"  Target: {self.target.unique_id if self.target else 'None'}")
 
     def __getstate__(self):
         return {
             'id': self.unique_id,
-            'start_id': self.start_element.unique_id,
-            'end_id': self.end_element.unique_id
+            'source_id': self.source.unique_id,  # Nome correto
+            'target_id': self.target.unique_id   # ← Aqui estava o erro
         }
 
     def __setstate__(self, state):
+        required_keys = {'id', 'source_id', 'target_id'}
+        if not required_keys.issubset(state.keys()):
+            raise ValueError(f"Estado inválido da conexão, faltam chaves: {required_keys - state.keys()}")
+        
         self.unique_id = state['id']
-        self.start_element = None  # Será definido no carregamento
-        self.end_element = None    # Será definido no carregamento
+        self._source_id = state['source_id']  # Armazena temporariamente
+        self._target_id = state['target_id']
+
+    def update_position(self):
+        # Garantir pontos atualizados
+        start_point = self.source.scenePos() + QPointF(50, 30)  # Centro do elemento origem
+        end_point = self.target.scenePos() + QPointF(50, 30)    # Centro do elemento destino
+        self.setLine(QLineF(start_point, end_point))
 
     def serialize(self):
         return {
-            'start_id': id(self.start_element),
-            'end_id': id(self.end_element)
+            'connection_id': self.unique_id,
+            'start_element_id': self.start_id,
+            'end_element_id': self.end_id
         }
-
-    def update_position(self):
-        start_pos = self.start_element.sceneBoundingRect().center()
-        end_pos = self.end_element.sceneBoundingRect().center()
-        self.setLine(start_pos.x(), start_pos.y(), end_pos.x(), end_pos.y())
 
 class BPMNPalette(QWidget):
     def __init__(self, canvas):
@@ -425,7 +618,13 @@ class BPMNEditor(QMainWindow):
         self.palette.editor_ref = self 
         self.canvas.editor_ref = self 
         self.properties = PropertiesPanel()
-        
+        self.current_file = None  # Adicionar atributo
+
+        # Configurações de auto salvamento
+        self.autosave_timer = QTimer()
+        self.autosave_timer.timeout.connect(self.autoSave)
+        self.autosave_timer.start(300000)  # 5 minutos
+
         # 1. Criar todas as ações primeiro
         self.create_actions()
         
@@ -435,6 +634,14 @@ class BPMNEditor(QMainWindow):
         self.setWindowTitle("Editor BPMN")
         self.setGeometry(100, 100, 1200, 800)
         self.show()
+        # Menu Arquivo
+        file_menu = self.menuBar().addMenu("Arquivo")
+        
+        # Ação Salvar (definir apenas aqui)
+        save_action = QAction(QIcon(), "Salvar", self)
+        save_action.setShortcut("Ctrl+S")
+        save_action.triggered.connect(self.save_project)
+        file_menu.addAction(save_action)
 
     def create_actions(self):
         self.new_action = QAction("&Novo", self)
@@ -524,7 +731,7 @@ class BPMNEditor(QMainWindow):
             "&Salvar Projeto", 
             self
         )
-        self.save_action.setShortcut("Ctrl+S")
+        # self.save_action.setShortcut("Ctrl+S")
         self.save_action.triggered.connect(self.save_project)
         
         # Ação Abrir
@@ -566,6 +773,18 @@ class BPMNEditor(QMainWindow):
         toolbar = self.addToolBar("Arquivo")
         toolbar.addAction(self.open_action)
         toolbar.addAction(self.save_action)  # ← Agora visível na UI
+
+    def autoSave(self):
+        if self.current_file:
+            try:
+                self.save_model()
+                self.statusBar().showMessage(f"Autosalvo em {datetime.now().strftime('%H:%M')}", 2000)
+            except Exception as e:
+                logging.error(f"Autosalvo falhou: {str(e)}")
+
+    def setWindowModifiedFlag(self, modified):
+        title = "Editor BPMN" + ("*" if modified else "")
+        self.setWindowTitle(title)
 
     def new_diagram(self):
         self.canvas.scene.clear()
@@ -662,6 +881,7 @@ class BPMNEditor(QMainWindow):
             self.statusBar().showMessage(f'Imagem exportada: {file_name}')
 
     def save_project(self):
+        print("[DEBUG] Salvando projeto...")  # Verifique se esta linha aparece
         try:
             path, _ = QFileDialog.getSaveFileName(self, "Salvar Projeto", "", "BPMN Files (*.bpmn)")
             if path:
@@ -680,6 +900,7 @@ class BPMNEditor(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "Erro", f"Falha ao salvar: {str(e)}")
+            logging.error(f"Erro ao salvar: {str(e)}")
 
     def load_project(self):
         try:
@@ -705,8 +926,8 @@ class BPMNEditor(QMainWindow):
                 
                 # Passo 2: Reconectar
                 for conn_data in data['connections']:
-                    start = elements_map.get(conn_data['start_id'])
-                    end = elements_map.get(conn_data['end_id'])
+                    start = elements_map.get(conn_data['source_id'])
+                    end = elements_map.get(conn_data['target_id'])
                     if start and end:
                         self.canvas.create_connection(start, end)
                     else:
@@ -726,6 +947,96 @@ class BPMNEditor(QMainWindow):
                 self.canvas.scene.removeItem(item)
         self.canvas.scene.update()
 
+    def save_model(self):
+        # Limpar cena antes de coletar dados
+        self.canvas.scene.clearSelection()
+        
+        # Coletar dados de forma segura
+        data = {
+            'elements': [pickle.dumps(item) for item in self.canvas.scene.items() 
+                        if isinstance(item, BPMNElement)],
+            'connections': [pickle.dumps(item) for item in self.canvas.scene.items()
+                        if isinstance(item, BPMNConnection)]
+        }
+        
+        with open(self.current_file, 'wb') as f:
+            pickle.dump(data, f)
+
+    def load_model(self):
+        # Resetar estado completamente
+        self.canvas.scene.clear()
+        self.current_file = None
+        
+        with open(self.current_file, 'rb') as f:
+            data = pickle.load(f)
+        
+        id_map = {}
+        # Desserialização em 2 passos
+        for item_type in ['elements', 'connections']:
+            for item_data in data[item_type]:
+                item = pickle.loads(item_data)
+                if isinstance(item, BPMNElement):
+                    id_map[item.unique_id] = item
+                    self.canvas.scene.addItem(item)
+                elif isinstance(item, BPMNConnection):
+                    # Conexões serão reconstruídas posteriormente
+                    pass
+
+        # Primeira passada: apenas elementos
+        for item_data in data['elements']:
+            item = pickle.loads(item_data)
+            id_map[item.unique_id] = item
+            self.canvas.scene.addItem(item)
+        
+        # Reconectar elementos
+        logging.info(f"Elementos carregados: {len(id_map)}")
+        logging.info(f"Conexões a processar: {len(data['connections'])}")
+        
+        for idx, item_data in enumerate(data['connections']):
+            conn = pickle.loads(item_data)
+            logging.debug(f"Processando conexão {idx+1}/{len(data['connections'])}: {conn}")
+            conn = pickle.loads(item_data)
+
+            source_id = conn['source_id']  # Nome correto
+            target_id = conn['target_id']
+            
+            source = id_map.get(source_id)
+            target = id_map.get(target_id)
+            
+            if source and target:
+                new_conn = BPMNConnection(source, target)
+                new_conn.unique_id = conn['id']
+                self.canvas.scene.addItem(new_conn)
+                # Mantenha as referências nos elementos
+                source.add_connection(new_conn)
+                target.add_connection(new_conn)
+            else:
+                logging.error(f"Conexão {conn['id']} inválida: "
+                            f"Source ({source_id}) ou Target ({target_id}) não encontrados")
+                
+    def salvarArquivo(self):
+        if not self.current_file:
+            self.current_file, _ = QFileDialog.getSaveFileName(
+                self, "Salvar Arquivo", "", "BPMN Files (*.bpmn)")
+        
+        if self.current_file:
+            try:
+                self.save_model()  # ← Substituir código direto pelo método
+                self.statusBar().showMessage(f"Modelo salvo em: {self.current_file}", 5000)
+            except Exception as e:
+                QMessageBox.critical(self, "Erro", f"Falha ao salvar:\n{str(e)}")
+
+    def abrirArquivo(self):
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Abrir Arquivo", "", "BPMN Files (*.bpmn)")
+        
+        if filename:
+            try:
+                self.current_file = filename
+                self.load_model()  # ← Usar método unificado
+                self.statusBar().showMessage(f"Modelo carregado: {filename}", 5000)
+            except Exception as e:
+                QMessageBox.critical(self, "Erro", f"Falha ao carregar:\n{str(e)}")
 
 # Adicione no final do arquivo:
 if __name__ == "__main__":
