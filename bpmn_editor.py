@@ -78,12 +78,11 @@ class BPMNElement(QGraphicsRectItem):
                     QGraphicsItem.ItemIsSelectable |
                     QGraphicsItem.ItemSendsGeometryChanges |
                     QGraphicsItem.ItemSendsScenePositionChanges)
-        self.setFlag(QGraphicsItem.ItemIsMovable, True)
-        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        # self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        # self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
         
 
     def serialize(self):
-        print(f"Serializando elemento {id(self)}: {self.serialize()}")
         return {
             'type': self.element_type,
             'x': self.x(),
@@ -276,13 +275,22 @@ class BPMNCanvas(QGraphicsView):
         self.setMinimumSize(400, 300)      # Garantir tamanho mínimo
         self.editor_ref = None  # Inicializar atributo
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         self.drag_start_position = QPoint()
         self.connection_source = None
         self.temp_connection = None        
         self.selected_elements = []  # Nova lista de seleção
-        self.setDragMode(QGraphicsView.RubberBandDrag)  # Já existe no código
         self.setRubberBandSelectionMode(Qt.ContainsItemBoundingRect)  # ← Nova linha
+
+        self.setDragMode(QGraphicsView.ScrollHandDrag)  # Modo de arrastar com botão esquerdo
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        self.viewport().update()
+
+        # Habilitar eventos de arrasto para scroll
+        self.setInteractive(True)
+        self.setRubberBandSelectionMode(Qt.ContainsItemShape)
 
         self.delete_shortcut = QShortcut(QKeySequence.Delete, self)
         self.delete_shortcut.activated.connect(
@@ -455,8 +463,13 @@ class BPMNCanvas(QGraphicsView):
             item = self.itemAt(event.pos())
             if not item:  # Só limpa se clicar fora dos elementos
                 self.scene.clearSelection()
-        
-        super().mousePressEvent(event)
+        if event.button() == Qt.RightButton:
+            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            fake_event = event
+            fake_event.setButton(Qt.LeftButton)  # Simular clique esquerdo
+            super().mousePressEvent(fake_event)
+        else:        
+            super().mousePressEvent(event)
 
 
     def mouseMoveEvent(self, event):
@@ -468,14 +481,21 @@ class BPMNCanvas(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.RightButton:
-            # Verificar se há exatamente 2 elementos selecionados
-            selected_items = [item for item in self.scene.selectedItems() if isinstance(item, BPMNElement)]
+            self.setDragMode(QGraphicsView.RubberBandDrag)  # Novo código
+            
+            # Mantenha a lógica existente de conexão
+            selected_items = [item for item in self.scene.selectedItems() 
+                            if isinstance(item, BPMNElement)]
+
+            if len(self.scene.selectedItems()) == 0:
+                return  # Ignorar clique direito em área vazia
             
             if len(selected_items) == 2:
                 source, target = selected_items
                 self.create_connection(source, target)
             else:
-                QMessageBox.warning(self, "Erro", "Selecione exatamente 2 elementos para conectar.")
+                QMessageBox.warning(self, "Erro", 
+                    "Selecione exatamente 2 elementos para conectar.")
         
         super().mouseReleaseEvent(event)
 
@@ -500,11 +520,6 @@ class BPMNCanvas(QGraphicsView):
                                 self.scene.removeItem(conn)
                         self.scene.removeItem(item)
 
-                # Processar conexões
-                # for conn in connections:
-                #     conn.source.remove_connection(conn)
-                #     conn.target.remove_connection(conn)
-                #     self.scene.removeItem(conn)
             finally:
                 self.scene.blockSignals(False)
                 self.scene.update()  # Força atualização única
@@ -549,12 +564,23 @@ class BPMNCanvas(QGraphicsView):
             self.editor_ref.properties.hide()
 
     def wheelEvent(self, event):
-        zoom_factor = 1.25
-        if event.angleDelta().y() > 0:
-            self.scale(zoom_factor, zoom_factor)
-        else:
-            self.scale(1/zoom_factor, 1/zoom_factor)
-        self.scene.update()  # Força redesenho do grid
+        # Comportamento padrão para scroll vertical
+        if not event.modifiers():
+            super().wheelEvent(event)
+            return
+        
+        # Zoom apenas com Ctrl pressionado
+        if event.modifiers() & Qt.ControlModifier:
+            zoom_factor = 1.25
+            if event.angleDelta().y() > 0:
+                self.scale(zoom_factor, zoom_factor)
+            else:
+                self.scale(1/zoom_factor, 1/zoom_factor)
+            self.scene.update()
+
+    def resizeEvent(self, event):
+        self.setSceneRect(QRectF(self.viewport().rect()))  # Atualizar área visível
+        super().resizeEvent(event)
 
 class BPMNConnection(QGraphicsLineItem):
     def __init__(self, source, target):
