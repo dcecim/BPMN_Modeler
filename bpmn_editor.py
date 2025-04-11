@@ -3,15 +3,16 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget, QP
                             QLabel, QDialog, QHBoxLayout, QLineEdit, QTextEdit, QSplitter,
                             QGraphicsView, QGraphicsScene, QGraphicsRectItem, QStatusBar,
                             QToolBar, QAction, QFileDialog, QMenu, QGraphicsLineItem, QStyle,
-                            QGraphicsItem, QMessageBox)
-from PyQt5.QtGui import (QIcon, QDrag, QPainter, QColor, QBrush, QCursor,
-                         QFont, QPixmap, QPen, QPolygonF, QPainterPath)
+                            QGraphicsItem, QMessageBox, QShortcut)
+from PyQt5.QtGui import (QIcon, QDrag, QPainter, QColor, QBrush, QCursor, 
+                         QFont, QPixmap, QPen, QPolygonF, QPainterPath, QKeySequence)
 from PyQt5.QtCore import (Qt, QMimeData, QPoint, QPointF, QSize, 
                           QRectF, QLineF, QTimer)
 from functools import partial 
 import traceback
 import logging, json, uuid, pickle
 import locale
+from weakref import ref
 
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')  # Forçar locale compatível
 sys.stdout.reconfigure(encoding='utf-8')  # Configurar saída padrão
@@ -208,11 +209,64 @@ class BPMNElement(QGraphicsRectItem):
         if connection in self.connections:
             self.connections.remove(connection)
 
+class GridScene(QGraphicsScene):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.grid_visible = True
+        self.minor_spacing = 20  # Espaçamento menor (20px)
+        self.major_spacing = 100  # Espaçamento maior (100px)
+        self.setBackgroundBrush(QBrush(Qt.white))
+        
+    def drawBackground(self, painter, rect):
+        super().drawBackground(painter, rect)
+        if not self.grid_visible:
+            return
+
+        # Configurações iniciais
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        left = int(rect.left()) - (int(rect.left()) % self.minor_spacing)
+        top = int(rect.top()) - (int(rect.top()) % self.minor_spacing)
+
+        # Linhas menores
+        minor_pen = QPen(QColor(220, 220, 220), 0.5)
+        painter.setPen(minor_pen)
+        
+        # Linhas horizontais
+        y = top
+        while y < rect.bottom():
+            painter.drawLine(QLineF(rect.left(), y, rect.right(), y))
+            y += self.minor_spacing
+            
+        # Linhas verticais
+        x = left
+        while x < rect.right():
+            painter.drawLine(QLineF(x, rect.top(), x, rect.bottom()))
+            x += self.minor_spacing
+
+        # Linhas principais
+        major_pen = QPen(QColor(200, 200, 200), 1)
+        painter.setPen(major_pen)
+        
+        # Linhas horizontais principais
+        y = top
+        while y < rect.bottom():
+            if y % self.major_spacing == 0:
+                painter.drawLine(QLineF(rect.left(), y, rect.right(), y))
+            y += self.minor_spacing
+            
+        # Linhas verticais principais
+        x = left
+        while x < rect.right():
+            if x % self.major_spacing == 0:
+                painter.drawLine(QLineF(x, rect.top(), x, rect.bottom()))
+            x += self.minor_spacing
+
 class BPMNCanvas(QGraphicsView):
     def __init__(self):
         super().__init__()
         self.viewport().setAcceptDrops(True)  # ← LINHA CRÍTICA ADICIONADA
-        self.scene = QGraphicsScene(self)
+        # self.scene = QGraphicsScene(self)
+        self.scene = GridScene(self)  # ← Alterado para nossa cena personalizada
         self.setScene(self.scene)
         self.setRenderHint(QPainter.Antialiasing)
         self.setDragMode(QGraphicsView.RubberBandDrag)
@@ -229,6 +283,23 @@ class BPMNCanvas(QGraphicsView):
         self.selected_elements = []  # Nova lista de seleção
         self.setDragMode(QGraphicsView.RubberBandDrag)  # Já existe no código
         self.setRubberBandSelectionMode(Qt.ContainsItemBoundingRect)  # ← Nova linha
+
+        self.delete_shortcut = QShortcut(QKeySequence.Delete, self)
+        self.delete_shortcut.activated.connect(
+            lambda: (self.delete_selected_connections() 
+                    or self.delete_selected_elements())
+        )
+
+        self.delete_shortcut = QShortcut(QKeySequence("Delete"), self)
+        self.delete_shortcut.activated.connect(self.delete_selected_elements)
+
+        self.scene.selectionChanged.connect(self.on_selection_change)
+        self.editor_ref = ref(self.editor_ref) if self.editor_ref else None
+
+        # Nova configuração de performance
+        self.setCacheMode(QGraphicsView.CacheBackground)
+        self.scene.setItemIndexMethod(QGraphicsScene.NoIndex)
+
         print("Elementos na cena:", self.scene.items())  # Deve mostrar os elementos adicionados
 
     def add_element(self, element_type, pos):
@@ -278,18 +349,35 @@ class BPMNCanvas(QGraphicsView):
         event.acceptProposedAction()
         # self.viewport().update()
 
-
     def contextMenuEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
-        items = [item for item in self.scene.items(scene_pos) if isinstance(item, BPMNElement)]
+        items = self.scene.items(scene_pos)
+        menu = QMenu()
+
+        # Ação para remover seleção múltipla
+        delete_selected_action = QAction("🗑️ Remover Seleção", self)
+        delete_selected_action.triggered.connect(self.delete_selected_elements)
+        if self.scene.selectedItems():  # Verifica se há itens selecionados
+            menu.addAction(delete_selected_action)
+
+        # Verificar conexões primeiro
+        connections = [item for item in items if isinstance(item, BPMNConnection)]
+        if connections:
+            delete_conn_action = QAction("🗑️ Remover Conexão", self)
+            delete_conn_action.triggered.connect(self.delete_selected_connections)
+            menu.addAction(delete_conn_action)
         
-        if len(items) == 1:
-            # Menu para elemento único
-            menu = QMenu()
-            connect_action = menu.addAction("🔄 Conectar a...")
+        # Verificar elementos BPMN
+        elements = [item for item in items if isinstance(item, BPMNElement)]
+        if elements:
+            element = elements[0]  # Pega o elemento superior
+            connect_action = QAction("🔗 Conectar a...", self)
             connect_action.triggered.connect(
-                lambda: self.initiate_connection_mode(items[0])
+                lambda: self.initiate_connection_mode(element)
             )
+            menu.addAction(connect_action)
+        
+        if menu.actions():
             menu.exec_(event.globalPos())
 
     def initiate_connection_mode(self, source_element):
@@ -395,32 +483,78 @@ class BPMNCanvas(QGraphicsView):
         try:
             # Obter todos os itens selecionados
             selected_items = self.scene.selectedItems()
-            
+
             for item in selected_items:
-                logging.debug(f"Removendo elemento {item.unique_id}")  # ← Log de debug
-                # Remover conexões associadas
-                if isinstance(item, BPMNElement):
-                    # Remover conexões onde o elemento é origem ou destino
-                    for conn in item.connections[:]:  # Iterar cópia da lista
-                        conn.source.remove_connection(conn)
-                        conn.target.remove_connection(conn)
-                        self.scene.removeItem(conn)
-                    
-                    # Remover da lista de elementos
-                    if item in self.elements:
-                        self.elements.remove(item)
-                        
-                # Remover da cena
-                self.scene.removeItem(item)
-            
-            self.scene.update()
-            if self.editor_ref:  # ← Fechar propriedades
-                self.editor_ref.properties.hide()
+                if isinstance(item, BPMNElement) and item in self.elements:
+                    self.elements.remove(item)  # Atualiza lista interna
+            try:
+                self.scene.blockSignals(True)
+
+                for item in selected_items:
+                    if isinstance(item, (BPMNElement, BPMNConnection)):
+                        # Remove conexões bidirecionais
+                        if hasattr(item, 'connections'):
+                            for conn in item.connections[:]:  # Cópia para iteração segura
+                                conn.source.connections.remove(conn)
+                                conn.target.connections.remove(conn)
+                                self.scene.removeItem(conn)
+                        self.scene.removeItem(item)
+
+                # Processar conexões
+                # for conn in connections:
+                #     conn.source.remove_connection(conn)
+                #     conn.target.remove_connection(conn)
+                #     self.scene.removeItem(conn)
+            finally:
+                self.scene.blockSignals(False)
+                self.scene.update()  # Força atualização única
                 
-            logging.info(f"{len(selected_items)} elementos removidos")
-            
+                # Dispara manualmente se necessário
+                self.scene.selectionChanged.emit() 
+
+                if self.editor_ref:  # ← Fechar propriedades
+                    self.editor_ref.properties.hide()
+                    
+                logging.info(f"{len(selected_items)} elementos removidos")
+
+
         except Exception as e:
             logging.error(f"Erro ao remover elementos: {str(e)}")
+
+    def delete_selected_connections(self):
+        try:
+            selected = [item for item in self.scene.selectedItems() 
+                      if isinstance(item, BPMNConnection)]
+            
+            for connection in selected:
+                # Remover das listas de conexões dos elementos
+                connection.source.remove_connection(connection)
+                connection.target.remove_connection(connection)
+                # Remover da cena
+                self.scene.removeItem(connection)
+                
+            if self.editor_ref:
+                self.editor_ref.properties.hide()
+                
+            logging.info(f"{len(selected)} conexões removidas")
+            
+        except Exception as e:
+            logging.error(f"Erro ao remover conexões: {str(e)}")
+
+    def on_selection_change(self):
+        if self.scene.selectedItems():
+            return  # Aborta se houver seleção
+        """Atualiza UI quando seleção muda"""
+        if not self.scene.selectedItems() and self.editor_ref:
+            self.editor_ref.properties.hide()
+
+    def wheelEvent(self, event):
+        zoom_factor = 1.25
+        if event.angleDelta().y() > 0:
+            self.scale(zoom_factor, zoom_factor)
+        else:
+            self.scale(1/zoom_factor, 1/zoom_factor)
+        self.scene.update()  # Força redesenho do grid
 
 class BPMNConnection(QGraphicsLineItem):
     def __init__(self, source, target):
@@ -432,19 +566,18 @@ class BPMNConnection(QGraphicsLineItem):
         # Garantir referências bidirecionais
         source.connections.append(self)
         target.connections.append(self)
+        self.source.add_connection(self)
+        self.target.add_connection(self)
 
         # Configurações de serialização
         self.setData(0, self.unique_id)  # Armazenar ID no item
         self.setFlags(QGraphicsItem.ItemIsSelectable)
         
         # Configurações visuais
-        self.setPen(QPen(Qt.darkGray, 2, Qt.SolidLine, Qt.RoundCap))
+        self.setPen(QPen(Qt.darkGray, 2, Qt.SolidLine, Qt.RoundCap))  # Atualizado
         self.setZValue(-1)  # Ficar atrás dos elementos
-        
-        # Conexão bidirecional
-        self.source.add_connection(self)
-        self.target.add_connection(self)
         self.update_position()
+        
         # DEBUG:
         print(f"[DEBUG] Conexão {self.unique_id} criada com:")  # ASCII seguro
         print(f"  Source: {self.source.unique_id if self.source else 'None'}")
@@ -478,6 +611,13 @@ class BPMNConnection(QGraphicsLineItem):
             'start_element_id': self.start_id,
             'end_element_id': self.end_id
         }
+
+    def paint(self, painter, option, widget):
+        if self.isSelected():
+            painter.setPen(QPen(Qt.red, 2, Qt.DashLine))
+        else:
+            painter.setPen(QPen(Qt.darkGray, 2, Qt.SolidLine))
+        painter.drawLine(self.line())
 
 class BPMNPalette(QWidget):
     def __init__(self, canvas):
