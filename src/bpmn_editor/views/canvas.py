@@ -1,8 +1,8 @@
 import sys
 from PyQt5.QtWidgets import (QGraphicsView, QGraphicsScene, QAction, QMenu, QGraphicsLineItem, 
                              QMessageBox, QShortcut)
-from PyQt5.QtGui import (QPainter, QCursor, QPen,QKeySequence)
-from PyQt5.QtCore import (Qt, QPoint, QPointF, QRectF, QLineF)
+from PyQt5.QtGui import (QPainter, QCursor, QPen,QKeySequence, QMouseEvent)
+from PyQt5.QtCore import (Qt, QEvent, QPoint, QPointF, QRectF, QLineF)
 
 from ..models.grid import GridScene  # Dois pontos sobem um nível
 from ..models.elements import BPMNElement, BPMNConnection
@@ -31,6 +31,7 @@ class BPMNCanvas(QGraphicsView):
         self.drag_start_position = QPoint()
         self.connection_source = None
         self.temp_connection = None        
+        self.connection_line = None  # ← Adicione esta linha
         self.selected_elements = []  # Nova lista de seleção
         self.setRubberBandSelectionMode(Qt.ContainsItemBoundingRect)  # ← Nova linha
 
@@ -157,14 +158,35 @@ class BPMNCanvas(QGraphicsView):
         # Monitorar movimento do mouse
         self.mouseMoveEvent = self.connection_mouse_move
         self.mousePressEvent = self.connection_mouse_press
+        
+    def start_connection(self, element):
+        self.connection_source = element
+        self.connection_line = QGraphicsLineItem()  # ← Criação explícita
+        self.scene().addItem(self.connection_line)  # ← Adição à cena
 
     def connection_mouse_move(self, event):
-        end_pos = self.mapToScene(event.pos())
-        line = QLineF(
-            self.connection_source.sceneBoundingRect().center(),
-            end_pos
-        )
-        self.temp_connection.setLine(line)
+        """Atualiza a linha de conexão durante o arraste do mouse"""
+        if not hasattr(self, 'connection_line') or self.connection_line is None:
+            return  # ← Retorna prematuramente se o atributo não existir ou for None
+        
+        try:
+            # Verificação crítica de null-safety
+            if self.connection_source is None:  # ← Nova verificação
+                self.connection_line = None
+                return
+
+            # Cálculo das coordenadas (com tratamento de exceção adicional)
+            source_center = self.connection_source.sceneBoundingRect().center()
+            mouse_pos = self.mapToScene(event.pos())
+            
+            # Atualização da geometria da linha
+            self.connection_line.setLine(
+                QLineF(source_center, mouse_pos)
+            )
+            
+        except Exception as e:
+            logging.error(f"Erro durante atualização da conexão: {str(e)}")
+            self.connection_line = None
 
     def connection_mouse_press(self, event):
         if event.button() == Qt.LeftButton:
@@ -218,8 +240,15 @@ class BPMNCanvas(QGraphicsView):
                 self.scene.clearSelection()
         if event.button() == Qt.RightButton:
             self.setDragMode(QGraphicsView.ScrollHandDrag)
-            fake_event = event
-            fake_event.setButton(Qt.LeftButton)  # Simular clique esquerdo
+            fake_event = QMouseEvent(
+                QEvent.MouseButtonPress, 
+                QPointF(event.pos()), 
+                Qt.LeftButton, 
+                Qt.LeftButton, 
+                Qt.NoModifier
+            )
+
+            # fake_event.setButton(Qt.LeftButton)  # Simular clique esquerdo
             super().mousePressEvent(fake_event)
         else:        
             super().mousePressEvent(event)
