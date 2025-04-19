@@ -1,0 +1,12 @@
+{
+  "actions": [
+    {
+      "action": "Enviar Email",
+      "params": "divino.cecim@gmail.com"
+    },
+    {
+      "action": "Validar Dados",
+      "params": "."
+    }
+  ]
+}

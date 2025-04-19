@@ -2,3 +2,4 @@ venv/
 codigo.py
 app.log
 c.txt
+__pycache__/

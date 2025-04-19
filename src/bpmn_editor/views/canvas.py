@@ -1,11 +1,12 @@
 import sys
 from PyQt5.QtWidgets import (QGraphicsView, QGraphicsScene, QAction, QMenu, QGraphicsLineItem, 
-                             QMessageBox, QShortcut)
-from PyQt5.QtGui import (QPainter, QCursor, QPen,QKeySequence, QMouseEvent)
-from PyQt5.QtCore import (Qt, QEvent, QPoint, QPointF, QRectF, QLineF)
+                             QMessageBox, QShortcut, QSplitter)
+from PyQt5.QtGui import (QPainter, QCursor, QPen,QKeySequence, QMouseEvent, QTransform)
+from PyQt5.QtCore import (Qt, QEvent, QPoint, QPointF, QRectF, QLineF, QObject, pyqtSignal)
 
 from ..models.grid import GridScene  # Dois pontos sobem um nível
 from ..models.elements import BPMNElement, BPMNConnection
+from ..dialogs.property_dialog import PropertyDialog
 
 from weakref import ref
 import logging
@@ -13,27 +14,54 @@ logger = logging.getLogger(__name__)
 
 print(sys.path)  # Deve incluir o caminho do projeto
 
+from PyQt5.QtCore import QObject, pyqtSignal
+
+class CanvasSignals(QObject):
+    """Sinais customizados do canvas"""
+    selectionChanged = pyqtSignal(list)  # Sinal para mudança de seleção
+    # Se necessário, adicionarei outros sinais (ex: elementAdded, connectionCreated)
+
 class BPMNCanvas(QGraphicsView):
-    def __init__(self):
-        super().__init__()
-        self.viewport().setAcceptDrops(True)  # ← LINHA CRÍTICA ADICIONADA
-        # self.scene = QGraphicsScene(self)
-        self.scene = GridScene(self)  # ← Alterado para nossa cena personalizada
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # Criar uma nova instância de GridScene
+        self.scene = GridScene()
         self.setScene(self.scene)
+        
+        # Configurações
         self.setRenderHint(QPainter.Antialiasing)
-        self.setDragMode(QGraphicsView.RubberBandDrag)
+        
+        # Adicionar o atributo mode
+        self.mode = "select"  # Valores possíveis: "select", "connection", "create"
+        
+        # Conectar o sinal de seleção alterada
+        self.scene.selectionChanged.connect(self.on_selection_change)
+
+        # Outras inicializações
+        self.temp_connection = None
+        self.connections = []
+        
+        self.signals = CanvasSignals() 
+        self.viewport().setAcceptDrops(True)  # ← LINHA CRÍTICA ADICIONADA
+ 
         self.setAcceptDrops(True)
         self.elements = []
-        self.setSceneRect(0, 0, 800, 600)  # Adicionar esta linha
-        self.setMinimumSize(400, 300)      # Garantir tamanho mínimo
+        self.setSceneRect(0, 0, 800, 600)   
+        self.setMinimumSize(400, 300)      
         self.editor_ref = None  # Inicializar atributo
+
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+    
         self.drag_start_position = QPoint()
+
         self.connection_source = None
-        self.temp_connection = None        
-        self.connection_line = None  # ← Adicione esta linha
+        self.temp_connection = None  
+        self.connection_line = None  
         self.selected_elements = []  # Nova lista de seleção
-        self.setRubberBandSelectionMode(Qt.ContainsItemBoundingRect)  # ← Nova linha
+
+        self.setRubberBandSelectionMode(Qt.ContainsItemBoundingRect) 
+        # self.setRubberBandSelectionMode(Qt.ContainsItemShape)
 
         self.setDragMode(QGraphicsView.ScrollHandDrag)  # Modo de arrastar com botão esquerdo
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -44,7 +72,6 @@ class BPMNCanvas(QGraphicsView):
 
         # Habilitar eventos de arrasto para scroll
         self.setInteractive(True)
-        self.setRubberBandSelectionMode(Qt.ContainsItemShape)
 
         self.delete_shortcut = QShortcut(QKeySequence.Delete, self)
         self.delete_shortcut.activated.connect(
@@ -62,17 +89,71 @@ class BPMNCanvas(QGraphicsView):
         self.setCacheMode(QGraphicsView.CacheBackground)
         self.scene.setItemIndexMethod(QGraphicsScene.NoIndex)
 
+        # 2. Configurações adicionais
+        self.setRenderHint(QPainter.Antialiasing)
+        self.setDragMode(QGraphicsView.RubberBandDrag)
+
+        # assert hasattr(self._scene, 'selectionChanged'), \
+        #     "Cena deve implementar sinal selectionChanged"
+        self.setup_connections()  
+
         print("Elementos na cena:", self.scene.items())  # Deve mostrar os elementos adicionados
 
-    def add_element(self, element_type, pos):
-        # Garantir que o tipo seja 'gateway' (não 'getway' ou variações)
-        valid_types = ['start', 'task', 'gateway']  # ← Nomes padronizados
+    def update_connections(self):
+        """Atualiza todas as conexões cruzadas"""
+        # Obter todas as conexões da cena
+        self.connections = [item for item in self.scene.items() if isinstance(item, BPMNConnection)]
+        
+        # Atualizar conexões cruzadas
+        for connection in self.connections:
+            # Encontrar todas as conexões que cruzam com a atual
+            crossing = [c for c in self.connections 
+                       if c != connection and 
+                       c.line().intersects(connection.line())]
+            connection.crossing_connections = crossing
+            
+            # Atualizar visual se houver cruzamentos
+            if crossing:
+                connection.update_position()
+
+    def on_element_selected(self, element):
+        dialog = PropertyDialog(element, self)  # 👈 Diálogo modal
+        dialog.exec_()
+
+    def setup_connections(self):
+        """Conecta sinais de movimento dos elementos"""
+        for element in self.elements:
+            element.moved.connect(self.on_element_moved)  # ← Conexão do sinal
+
+    def on_element_moved(self):
+        """Atualiza todas as conexões do elemento movido"""
+        sender_element = self.sender()  # Obtém o elemento que emitiu o sinal
+        for connection in sender_element.connections:
+            connection.update_path()
+        # self.canvas.update_connections() 
+        self.update_connections()  # ← Garantir atualização
+
+    def add_element(self, element_type: str, pos: QPointF):
+        valid_types = ['start', 'task', 'gateway']
         if element_type not in valid_types:
             raise ValueError(f"Tipo inválido: {element_type}")
         
         element = BPMNElement(element_type, pos)
-        element.set_editor_reference(self.editor_ref)  # Nova linha
-        element.setPos(pos)  # ← Garantir posicionamento correto
+        if self.editor_ref:
+            element.set_editor_reference(self.editor_ref)
+        element.setPos(pos)
+        self.scene.addItem(element)
+        self.elements.append(element)
+        return element
+    def add_element(self, element_type: str, pos: QPointF):
+        valid_types = ['start', 'task', 'gateway']
+        if element_type not in valid_types:
+            raise ValueError(f"Tipo inválido: {element_type}")
+        
+        element = BPMNElement(element_type, pos)
+        if self.editor_ref:
+            element.set_editor_reference(self.editor_ref)
+        element.setPos(pos)
         self.scene.addItem(element)
         self.elements.append(element)
         return element
@@ -99,17 +180,148 @@ class BPMNCanvas(QGraphicsView):
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasFormat("application/x-bpmn-element"):
+        # if event.mimeData().hasText():
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        # Correção crucial:
-        mime_data = event.mimeData()
-        element_type = bytes(mime_data.data("application/x-bpmn-element")).decode('utf-8')
-        
-        pos = self.mapToScene(event.pos())
-        self.add_element(element_type, pos)
-        event.acceptProposedAction()
-        # self.viewport().update()
+        if event.mimeData().hasFormat("application/x-bpmn-element"):
+            element_type = bytes(event.mimeData().data("application/x-bpmn-element")).decode()
+            pos = self.mapToScene(event.pos())
+            self.add_element(element_type, pos)
+            event.acceptProposedAction()
+
+    def create_connection(self, source, target):
+        """Cria uma conexão entre dois elementos BPMN"""
+        try:
+            # Validação crítica
+            if not source or not target or source == target:
+                return None
+                
+            # Verificar se já existe uma conexão entre os elementos
+            if not hasattr(source, 'connections'):
+                source.connections = []
+            if not hasattr(target, 'connections'):
+                target.connections = []
+                
+            for conn in source.connections:
+                if conn.source == source and conn.target == target:
+                    return None
+                
+            # Criar e configurar a conexão
+            connection = BPMNConnection(source, target)
+            self.scene.addItem(connection)
+            connection.setZValue(-1)  # Conexões ficam abaixo dos elementos
+            
+            # Atualizar visual
+            connection.update_position()
+            connection.update_path()
+            
+            # Atualizar conexões cruzadas
+            self.connections = [item for item in self.scene.items() if isinstance(item, BPMNConnection)]
+            self.update_connections()
+            
+            return connection
+            
+        except Exception as e:
+            logging.error(f"Erro ao criar conexão: {str(e)}")
+            return None
+
+    def mousePressEvent(self, event):
+        if self.mode == "select":
+            super().mousePressEvent(event)
+            return
+
+        if self.mode == "connection" and event.button() == Qt.LeftButton:
+            scene_pos = self.mapToScene(event.pos())
+            item = self.scene.itemAt(scene_pos, self.transform())
+            
+            if isinstance(item, BPMNElement):
+                if not self.connection_source:
+                    # Iniciar nova conexão
+                    self.connection_source = item
+                    source_center = item.sceneBoundingRect().center()
+                    source_pos = item.mapToScene(source_center)
+                    self.temp_connection = QGraphicsLineItem()
+                    self.temp_connection.setPen(QPen(Qt.black, 2, Qt.DashLine))
+                    self.temp_connection.setLine(QLineF(source_pos, scene_pos))
+                    self.scene.addItem(self.temp_connection)
+                    self.setCursor(Qt.CrossCursor)
+                else:
+                    # Finalizar conexão
+                    if item != self.connection_source:
+                        connection = self.create_connection(self.connection_source, item)
+                        if connection:
+                            self.connection_source.connections.append(connection)
+                            item.connections.append(connection)
+                            self.connections.append(connection)
+                            self.update_connections()
+                    
+                    # Limpar estado
+                    if self.temp_connection:
+                        self.scene.removeItem(self.temp_connection)
+                        self.temp_connection = None
+                    self.connection_source = None
+                    self.setCursor(Qt.ArrowCursor)
+                event.accept()
+                return
+
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.mode == "connection" and self.temp_connection and self.connection_source:
+            scene_pos = self.mapToScene(event.pos())
+            source_center = self.connection_source.sceneBoundingRect().center()
+            source_pos = self.connection_source.mapToScene(source_center)
+            self.temp_connection.setLine(QLineF(source_pos, scene_pos))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.mode == "connection" and self.temp_connection and event.button() == Qt.LeftButton:
+            scene_pos = self.mapToScene(event.pos())
+            item = self.scene.itemAt(scene_pos, self.transform())
+            
+            if isinstance(item, BPMNElement) and item != self.connection_source:
+                connection = self.create_connection(self.connection_source, item)
+                if connection:
+                    self.connection_source.connections.append(connection)
+                    item.connections.append(connection)
+                    self.connections.append(connection)
+                    self.update_connections()
+            
+            # Limpar estado
+            if self.temp_connection:
+                self.scene.removeItem(self.temp_connection)
+                self.temp_connection = None
+            self.connection_source = None
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def setMode(self, mode):
+        self.mode = mode
+        if mode == "select":
+            self.setCursor(Qt.ArrowCursor)
+            self.setDragMode(QGraphicsView.RubberBandDrag)
+            self.setInteractive(True)  # Garante que os itens possam ser selecionados
+            self.setRubberBandSelectionMode(Qt.IntersectsItemShape)  # Melhora a detecção de seleção
+        elif mode == "connection":
+            self.setCursor(Qt.CrossCursor)
+            self.setDragMode(QGraphicsView.NoDrag)
+            self.setInteractive(False)  # Desativa interação durante criação de conexão
+        elif mode == "create":
+            self.setCursor(Qt.PointingHandCursor)
+            self.setDragMode(QGraphicsView.NoDrag)
+            self.setInteractive(False)  # Desativa interação durante criação de elementos
+
+
+    def auto_route_connections(self):
+        """Evita sobreposições usando algoritmo de força direcional"""
+        for connection in self.connections:
+            if connection.has_crossings():
+                connection.adjust_path_around_obstacles()
 
     def contextMenuEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
@@ -158,35 +370,18 @@ class BPMNCanvas(QGraphicsView):
         # Monitorar movimento do mouse
         self.mouseMoveEvent = self.connection_mouse_move
         self.mousePressEvent = self.connection_mouse_press
-        
+
     def start_connection(self, element):
         self.connection_source = element
         self.connection_line = QGraphicsLineItem()  # ← Criação explícita
         self.scene().addItem(self.connection_line)  # ← Adição à cena
 
     def connection_mouse_move(self, event):
-        """Atualiza a linha de conexão durante o arraste do mouse"""
-        if not hasattr(self, 'connection_line') or self.connection_line is None:
-            return  # ← Retorna prematuramente se o atributo não existir ou for None
-        
-        try:
-            # Verificação crítica de null-safety
-            if self.connection_source is None:  # ← Nova verificação
-                self.connection_line = None
-                return
-
-            # Cálculo das coordenadas (com tratamento de exceção adicional)
-            source_center = self.connection_source.sceneBoundingRect().center()
-            mouse_pos = self.mapToScene(event.pos())
-            
-            # Atualização da geometria da linha
-            self.connection_line.setLine(
-                QLineF(source_center, mouse_pos)
-            )
-            
-        except Exception as e:
-            logging.error(f"Erro durante atualização da conexão: {str(e)}")
-            self.connection_line = None
+        if self.temp_connection:
+            source_center = self.temp_connection.line().p1()
+            end_pos = self.mapToScene(event.pos())
+            self.temp_connection.setLine(QLineF(source_center, end_pos))
+        super().mouseMoveEvent(event)
 
     def connection_mouse_press(self, event):
         if event.button() == Qt.LeftButton:
@@ -201,17 +396,6 @@ class BPMNCanvas(QGraphicsView):
         self.viewport().unsetCursor()
         self.mouseMoveEvent = super().mouseMoveEvent
         self.mousePressEvent = super().mousePressEvent
-
-    def create_connection(self, source, target):
-        # Validação crítica
-        if (isinstance(source, BPMNElement) and 
-            isinstance(target, BPMNElement) and 
-            source != target):
-            
-            connection = BPMNConnection(source, target)
-            self.scene.addItem(connection)
-            logging.info(f"Conexão criada: {source.unique_id} -> {target.unique_id}")
-        
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasFormat("application/x-bpmn-element"):
@@ -232,54 +416,98 @@ class BPMNCanvas(QGraphicsView):
         self.add_element(element_type, pos)
         event.acceptProposedAction()
 
-    def mousePressEvent(self, event):
-        # Limpar seleção apenas ao clicar em área vazia
-        if event.button() == Qt.LeftButton:
-            item = self.itemAt(event.pos())
-            if not item:  # Só limpa se clicar fora dos elementos
-                self.scene.clearSelection()
-        if event.button() == Qt.RightButton:
-            self.setDragMode(QGraphicsView.ScrollHandDrag)
-            fake_event = QMouseEvent(
-                QEvent.MouseButtonPress, 
-                QPointF(event.pos()), 
-                Qt.LeftButton, 
-                Qt.LeftButton, 
-                Qt.NoModifier
-            )
+    # # def mousePressEvent(self, event):
+    # #     # Limpar seleção apenas ao clicar em área vazia
+    # #     if event.button() == Qt.LeftButton:
+    # #         item = self.itemAt(event.pos())
+    # #         if not item:  # Só limpa se clicar fora dos elementos
+    # #             self.scene.clearSelection()
+    # #         self.setDragMode(QGraphicsView.RubberBandDrag)  # Modo de seleção
 
-            # fake_event.setButton(Qt.LeftButton)  # Simular clique esquerdo
-            super().mousePressEvent(fake_event)
-        else:        
-            super().mousePressEvent(event)
+    # #     if event.button() == Qt.RightButton:
+    # #         self.setDragMode(QGraphicsView.ScrollHandDrag)
+    # #         fake_event = QMouseEvent(
+    # #             QEvent.MouseButtonPress, 
+    # #             QPointF(event.pos()), 
+    # #             Qt.LeftButton, 
+    # #             Qt.LeftButton, 
+    # #             Qt.NoModifier
+    # #         )
+
+    # #         # fake_event.setButton(Qt.LeftButton)  # Simular clique esquerdo
+    # #         super().mousePressEvent(fake_event)
+    # #     else:        
+    # #         super().mousePressEvent(event)
+    # def mousePressEvent(self, event):
+    #     if self.mode == "connection":
+    #         item = self.itemAt(event.scenePos(), QTransform())
+    #         if isinstance(item, BPMNElement):
+    #             # Cria uma conexão temporária apenas com o elemento inicial
+    #             self.temp_connection = BPMNConnection(item)
+    #             self.addItem(self.temp_connection)
+    #     else:
+    #         super().mousePressEvent(event)
 
 
-    def mouseMoveEvent(self, event):
-        if self.temp_connection:
-            end_pos = self.mapToScene(event.pos())
-            self.temp_connection.end_pos = end_pos
-            self.temp_connection.update_position()
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.RightButton:
-            self.setDragMode(QGraphicsView.RubberBandDrag)  # Novo código
-            
-            # Mantenha a lógica existente de conexão
-            selected_items = [item for item in self.scene.selectedItems() 
-                            if isinstance(item, BPMNElement)]
-
-            if len(self.scene.selectedItems()) == 0:
-                return  # Ignorar clique direito em área vazia
-            
-            if len(selected_items) == 2:
-                source, target = selected_items
-                self.create_connection(source, target)
-            else:
-                QMessageBox.warning(self, "Erro", 
-                    "Selecione exatamente 2 elementos para conectar.")
+    # def mouseMoveEvent(self, event):
+    #     # Atualiza a conexão temporária enquanto o mouse se move
+    #     if self.temp_connection:
+    #         self.temp_connection.updatePath()
         
-        super().mouseReleaseEvent(event)
+    #     super().mouseMoveEvent(event)
+
+    # def mouseReleaseEvent(self, event):
+    #     try:
+    #         if event.button() == Qt.RightButton:
+    #             self.setDragMode(QGraphicsView.RubberBandDrag)
+                
+    #             # Obter elementos BPMN selecionados
+    #             selected_items = [item for item in self.scene.selectedItems() 
+    #                             if isinstance(item, BPMNElement)]
+                
+    #             if len(selected_items) == 2:
+    #                 source, target = selected_items
+    #                 connection = self.create_connection(source, target)
+    #                 if connection:
+    #                     self.scene.update()
+    #                     logging.info(f"Conexão criada entre {source.name} e {target.name}")
+    #                 else:
+    #                     QMessageBox.warning(self, "Aviso", 
+    #                         "Não foi possível criar a conexão. Verifique se já existe uma conexão entre estes elementos.")
+    #             elif len(selected_items) > 0:
+    #                 QMessageBox.warning(self, "Aviso", 
+    #                     "Selecione exatamente 2 elementos para conectar.")
+            
+    #         super().mouseReleaseEvent(event)
+            
+    #     except Exception as e:
+    #         logging.error(f"Erro ao criar conexão: {str(e)}")
+    #         QMessageBox.critical(self, "Erro", 
+    #             "Ocorreu um erro ao tentar criar a conexão.")
+    def validateConnection(self, start, end):
+        if not (isinstance(start, BPMNElement) and isinstance(end, BPMNElement)):
+            return False
+        if start == end:
+            return False
+        return True
+
+    # def mouseReleaseEvent(self, event):
+    #     if self.temp_connection:
+    #         item = self.itemAt(event.scenePos(), QTransform())
+            
+    #         if isinstance(item, BPMNElement):
+    #             # Usa o método seguro para definir o elemento final
+    #             self.temp_connection.setEndElement(item)
+    #             # Adiciona à lista de conexões do canvas
+    #             self.connections.append(self.temp_connection)
+    #         else:
+    #             # Remove conexões não finalizadas
+    #             self.scene().removeItem(self.temp_connection)
+            
+    #         # Limpa a referência temporária
+    #         self.temp_connection = None
+        
+    #     super().mouseReleaseEvent(event)
 
     def delete_selected_elements(self):
         try:
@@ -318,6 +546,12 @@ class BPMNCanvas(QGraphicsView):
         except Exception as e:
             logging.error(f"Erro ao remover elementos: {str(e)}")
 
+    def remove_connection(self, connection):
+        """Remove uma conexão da cena e da lista"""
+        self.scene().removeItem(connection)
+        if connection in self.connections:
+            self.connections.remove(connection)
+
     def delete_selected_connections(self):
         try:
             selected = [item for item in self.scene.selectedItems() 
@@ -343,7 +577,10 @@ class BPMNCanvas(QGraphicsView):
             return  # Aborta se houver seleção
         """Atualiza UI quando seleção muda"""
         if not self.scene.selectedItems() and self.editor_ref:
-            self.editor_ref.properties.hide()
+            # Verificar se o editor tem o atributo properties antes de tentar acessá-lo
+            editor = self.editor_ref() if isinstance(self.editor_ref, ref) else self.editor_ref
+            if editor and hasattr(editor, 'properties'):
+                editor.properties.hide()
 
     def wheelEvent(self, event):
         # Comportamento padrão para scroll vertical
@@ -364,3 +601,19 @@ class BPMNCanvas(QGraphicsView):
         self.setSceneRect(QRectF(self.viewport().rect()))  # Atualizar área visível
         super().resizeEvent(event)
 
+    def setMode(self, mode):
+        """
+        Define o modo de operação do canvas
+        
+        Args:
+            mode (str): O modo de operação ("select", "connection", "create")
+        """
+        self.mode = mode
+        
+        # Atualiza o cursor com base no modo
+        if mode == "connection":
+            self.setCursor(Qt.CrossCursor)
+        elif mode == "select":
+            self.setCursor(Qt.ArrowCursor)
+        elif mode == "create":
+            self.setCursor(Qt.PointingHandCursor)

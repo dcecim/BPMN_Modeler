@@ -1,6 +1,7 @@
 import sys
-from PyQt5.QtWidgets import (QPushButton, QStyle, QVBoxLayout, QWidget) 
-from PyQt5.QtGui import (QDrag, QPainter, QColor, QPixmap, QBrush)
+from PyQt5.QtWidgets import (QPushButton, QStyle, QVBoxLayout, QWidget, 
+                             QDockWidget, QApplication) 
+from PyQt5.QtGui import (QIcon, QDrag, QPainter, QColor, QPixmap, QBrush)
 from PyQt5.QtCore import (Qt, QMimeData, QPoint)
 
 import logging
@@ -8,45 +9,100 @@ logger = logging.getLogger(__name__)
 
  
 class DragButton(QPushButton):
-    def __init__(self, element_type, parent):
-        super().__init__(parent)
-        self.element_type = element_type
-        self.setFixedSize(120, 40)
-        self.drag_start_position = QPoint()  # Adicionado
+    def __init__(self, icon, text, element_type, parent=None, color=None):
+        if isinstance(icon, str):
+            icon = QIcon(icon)
 
-    # Remova todos os handlers de mouseMove/mouseRelease (estão no lugar errado)
+        super().__init__(icon, text, parent)
+        self.element_type = element_type
+        self.color = color if color else self.get_default_color(element_type)  # Armazenar a cor como atributo
+        self.setAcceptDrops(False)
+        self.setFixedSize(80, 80)
+        # Se uma cor foi fornecida, aplicá-la ao estilo do botão
+        if color:
+            self.setStyleSheet(f"background-color: {color};")
+
+    def setCanvasMode(self):
+        # Se for um botão de conexão
+        if self.element_type == "connection":
+            self.canvas.setMode("connection")
+        else:
+            # Para botões de elementos, configurar para modo de criação
+            self.canvas.setMode("create")
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.drag_start_position = event.pos()
 
     def mouseMoveEvent(self, event):
-        if (event.buttons() == Qt.LeftButton and 
-            (event.pos() - self.drag_start_position).manhattanLength() > 5):
+        if not (event.buttons() & Qt.LeftButton):
+            return
             
-            drag = QDrag(self)
-            mime_data = QMimeData()
-            mime_data.setData("application/x-bpmn-element", self.element_type.encode())
-            drag.setMimeData(mime_data)
+        if (event.pos() - self.drag_start_position).manhattanLength() < QApplication.startDragDistance():
+            return
+
+        # Cria o drag com feedback visual
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        mime_data.setData("application/x-bpmn-element", self.element_type.encode())
+        drag.setMimeData(mime_data)
+        
+        # Cria um pixmap de preview
+        pixmap = QPixmap(100, 60)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setBrush(QColor(self.color))
+        
+        if self.element_type == 'gateway':
+            painter.drawPolygon([
+                QPoint(50, 0), QPoint(100, 30),
+                QPoint(50, 60), QPoint(0, 30)
+            ])
+        else:
+            painter.drawRoundedRect(10, 10, 80, 40, 5, 5)
             
-            # Configurar visualização do drag
-            pixmap = QPixmap(100, 60)
-            pixmap.fill(Qt.transparent)
-            painter = QPainter(pixmap)
-            painter.setBrush(QColor('#2196F3' if self.element_type == 'task' else '#4CAF50'))
-            painter.drawRoundedRect(0, 0, 100, 60, 10, 10)
-            painter.end()
-            drag.setPixmap(pixmap)
-            drag.setHotSpot(QPoint(50, 30))
-            
-            drag.exec_(Qt.CopyAction)
-      
-class BPMNPalette(QWidget):
-    def __init__(self, canvas):
-        super().__init__()
+        painter.end()
+        drag.setPixmap(pixmap)
+        drag.exec_(Qt.CopyAction)
+
+    def setCanvas(self, canvas):
         self.canvas = canvas
-        self.drag_start_position = None
-        self.drag_element_type = None
-        self.init_ui()
+        # Conectar o clique do botão à mudança de modo
+        self.clicked.connect(self.updateCanvasMode)
+    
+    def updateCanvasMode(self):
+        if hasattr(self, 'canvas'):
+            if self.element_type == "connection":
+                self.canvas.mode = "connection"
+                self.canvas.setCursor(Qt.CrossCursor)
+            elif self.element_type == "select":
+                self.canvas.mode = "select"
+                self.canvas.setCursor(Qt.ArrowCursor)
+            else:
+                self.canvas.mode = "create"
+                self.canvas.setCursor(Qt.PointingHandCursor)
+
+    def get_default_color(self, element_type):
+        colors = {
+            'start': '#4CAF50',
+            'task': '#2196F3',
+            'gateway': '#FF9800',
+            'select': '#607D8B',
+            'connection': '#607D8B'
+        }
+        return colors.get(element_type, '#607D8B')
+
+class BPMNPalette(QDockWidget):
+    def __init__(self, canvas, parent=None):
+        super().__init__(parent)
+        self.canvas = canvas
+        self.buttons = []
+        self.setup_palette()
+
+        # Configurar os botões para usar o canvas
+        for button in self.buttons:
+            button.setCanvas(self.canvas)
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -67,6 +123,51 @@ class BPMNPalette(QWidget):
                 
         # print("Paleta visível?", self.palette.isVisible())  # Deve ser True
         layout.addStretch()
+
+    def setup_palette(self):
+        logging.debug("Configurando paleta de botões")
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        
+        # Adicionar botões de elementos BPMN
+        start_btn = DragButton(
+            icon=QIcon("C:/Aplicações Python/Prodesso de modelagem de fluxo/src/bpmn_editor/start.png"),
+            text="Início",
+            element_type="start"
+        )
+        self.buttons.append(start_btn)
+        layout.addWidget(start_btn)
+        
+        task_btn = DragButton(
+            icon=QIcon("C:/Aplicações Python/Prodesso de modelagem de fluxo/src/bpmn_editor/task.png"),
+            text="Tarefa",
+            element_type="task"
+        )
+        self.buttons.append(task_btn)
+        layout.addWidget(task_btn)
+        
+        gateway_btn = DragButton(
+            icon=QIcon("C:/Aplicações Python/Prodesso de modelagem de fluxo/src/bpmn_editor/gateway.png"),
+            text="Gateway",
+            element_type="gateway"
+        )
+        self.buttons.append(gateway_btn)
+        layout.addWidget(gateway_btn)
+        
+        # Adicionar botão de conexão
+        connection_btn = DragButton(
+            icon=QIcon("C:/Aplicações Python/Prodesso de modelagem de fluxo/src/bpmn_editor/connection.png"),
+            text="Conexão",
+            element_type="connection"
+        )
+        self.buttons.append(connection_btn)
+        layout.addWidget(connection_btn)
+        
+        # Definir o container como widget central
+        self.setWidget(container)
+        self.setFeatures(QDockWidget.NoDockWidgetFeatures)
+        self.setFixedWidth(200)
+
 
     def mouse_press(self, event, element_type):
         print("Mouse press iniciado") 

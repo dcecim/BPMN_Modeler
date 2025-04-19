@@ -10,3 +10,8 @@ def setup_logging():
             logging.StreamHandler(sys.stdout)
         ]
     )
+
+def setup_connection_logging():
+    logger = logging.getLogger('bpmn.connections')
+    logger.setLevel(logging.DEBUG)
+    # ... configuração adicional

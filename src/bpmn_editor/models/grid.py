@@ -1,18 +1,29 @@
-from PyQt5.QtWidgets import (QGraphicsScene)
-from PyQt5.QtGui import (QPainter, QColor, QBrush, QPen)
-from PyQt5.QtCore import (Qt, QLineF)
-import logging
-logger = logging.getLogger(__name__)
-
+from PyQt5.QtWidgets import QGraphicsScene
+from PyQt5.QtCore import Qt, QRectF, QLineF
+from PyQt5.QtGui import QPainter, QPen, QColor, QBrush
 
 class GridScene(QGraphicsScene):
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self):
+        super().__init__()
+        self.setSceneRect(QRectF(0, 0, 800, 600))
         self.grid_visible = True
-        self.minor_spacing = 20  # Espaçamento menor (20px)
-        self.major_spacing = 100  # Espaçamento maior (100px)
+        self.minor_spacing = 20
+        self.major_spacing = 100
         self.setBackgroundBrush(QBrush(Qt.white))
-        
+
+    def selectedItems(self):
+        try:
+            selected = []
+            for item in super().selectedItems():
+                try:
+                    if item and not item.isDeleted():
+                        selected.append(item)
+                except (RuntimeError, AttributeError):
+                    continue
+            return selected
+        except Exception:
+            return []
+
     def drawBackground(self, painter, rect):
         super().drawBackground(painter, rect)
         if not self.grid_visible:

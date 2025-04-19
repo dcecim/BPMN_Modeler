@@ -1,22 +1,33 @@
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QWidget, QSplitter,
-                            QAction, QFileDialog, QMessageBox)
+                            QAction, QFileDialog, QMessageBox, QSplitter)
 from PyQt5.QtGui import (QIcon)
 from PyQt5.QtCore import (Qt, QPointF, QTimer)
 
+from bpmn_editor.views.toolbar import DragButton, BPMNPalette
+
+from .utils.exceptions import excepthook
 from .models.elements import BPMNConnection, BPMNElement
 from .views.canvas import BPMNCanvas
-from .views.toolbar import DragButton, BPMNPalette
-from .views.properties import PropertiesPanel
+from .dialogs.property_dialog import PropertyDialog
+from .panels.actions_panel import ActionsPanel
+from .panels.script_panel import ScriptPanel
 
 from functools import partial 
 from weakref import ref
 from datetime import datetime
 
-import traceback
-import logging, json, uuid, pickle
+import logging, json, pickle
 import locale
 import sys
 from pathlib import Path
+
+from datetime import datetime
+import os
+import logging
+logger = logging.getLogger(__name__)
+
+# Dentro de autoSave():
+logger.info(f"Autosave realizado em {datetime.now().isoformat()}")
 
 # Adiciona o diretório pai ao Python Path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -24,29 +35,22 @@ sys.path.append(str(Path(__file__).parent.parent))
 locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')  # Forçar locale compatível
 sys.stdout.reconfigure(encoding='utf-8')  # Configurar saída padrão
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(message)s',
-    handlers=[
-        logging.FileHandler('app.log', encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-
 class BPMNEditor(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.canvas = BPMNCanvas()
-        self.palette = BPMNPalette(self.canvas)
-        self.palette.editor_ref = self 
+        self.canvas = BPMNCanvas(self)
+        self.actions_panel = ActionsPanel()
+        self.script_panel = ScriptPanel()
+        self.palette = BPMNPalette(self.canvas, self)
         self.canvas.editor_ref = self 
-        self.properties = PropertiesPanel()
         self.current_file = None  # Adicionar atributo
 
         # Configurações de auto salvamento
-        self.autosave_timer = QTimer()
+        self.autosave_timer = QTimer(self)
+        self.autosave_timer.setInterval(300000)  # 5 minutos (em ms)
         self.autosave_timer.timeout.connect(self.autoSave)
-        self.autosave_timer.start(300000)  # 5 minutos
+        self.autosave_timer.start()  # Inicia o timer!
+        self.statusBar().showMessage(f"Autosave: {datetime.now().strftime('%H:%M:%S')}", 5000)
 
         # 1. Criar todas as ações primeiro
         self.create_actions()
@@ -75,6 +79,47 @@ class BPMNEditor(QMainWindow):
         delete_action.triggered.connect(self.delete_selected)
         self.toolbar.addAction(delete_action)
 
+        self.canvas.signals.selectionChanged.connect(self.on_selection_changed)
+
+        self.splitter = QSplitter(Qt.Horizontal) 
+        self.setCentralWidget(self.splitter) 
+
+        self.splitter.addWidget(self.canvas)
+        
+        # Adiciona o painel de roteiro
+        self.addDockWidget(Qt.RightDockWidgetArea, self.script_panel)
+
+        self.property_dialog = PropertyDialog()  # Diálogo modal
+        self.actions_panel = ActionsPanel()
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.actions_panel)
+
+        self.splitter.setSizes([800, 200])  # Canvas (800px) + Painel (200px)
+        self.splitter.setStretchFactor(0, 1)  # Canvas expande
+        self.splitter.setStretchFactor(1, 1)  # Painel mantém proporção
+
+        self.actions_panel.setStyleSheet("""
+            QComboBox, QLineEdit {
+                padding: 5px;
+                border: 1px solid #cccccc;
+                border-radius: 3px;
+            }
+            QLabel {
+                font-weight: bold;
+                margin-top: 10px;
+            }
+        """)
+        # Configurar a paleta existente
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.palette)
+        self.palette.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        
+        # Configurações críticas de drag-and-drop
+        self.palette.setAcceptDrops(True)
+        self.palette.setFocusPolicy(Qt.StrongFocus)
+        self.palette.installEventFilter(self)
+
+        print("Ações Panel visível?", self.actions_panel.isVisible())  # Deve ser True
+        print("PropertyDialog:", hasattr(self, 'property_dialog'))     # Deve ser True
+
     def create_actions(self):
         self.new_action = QAction("&Novo", self)
         self.new_action.triggered.connect(self.new_file)  # Conectar ao método existente
@@ -99,20 +144,33 @@ class BPMNEditor(QMainWindow):
         palette = QWidget()
         palette.setFixedWidth(150)
         palette_layout = QVBoxLayout(palette)
-        
+
+        self.toolbar = BPMNPalette(self.canvas)
+
         # Botões de Elementos BPMN
-        element_types = ['start', 'task', 'gateway']
-        for elem in element_types:
-            btn = DragButton(elem, self)
-            btn.setText(elem.capitalize())
-            palette_layout.addWidget(btn)
+        elements = [
+            ('Início/Fim', 'start', '#4CAF50'),  # Adicione a COR como terceiro elemento
+            ('Tarefa', 'task', '#2196F3'),
+            ('Gateway', 'gateway', '#FF9800')
+        ]
+
+        for text, elem_type, color in elements:  # Desempacote todos os 3 valores
+            btn = DragButton(
+                element_type=elem_type, 
+                text='',
+                icon=QIcon(''),
+                color=color, 
+                parent=self  # ← Parente obrigatório
+            )
+            btn.setText(text)
+            self.palette.layout().addWidget(btn)
         
         # Layout Principal
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.palette)
         splitter.addWidget(self.canvas)
-        splitter.addWidget(self.properties)
+        # splitter.addWidget(self.properties)
         splitter.setSizes([200, 600, 200])  # Definir proporções iniciais
         self.setCentralWidget(splitter)
 
@@ -128,6 +186,27 @@ class BPMNEditor(QMainWindow):
         self.create_actions()
         self.init_menus()
         
+        # Criar o canvas
+        self.canvas = BPMNCanvas(self)
+        
+        print("Verificando toolbar...")
+        if hasattr(self, 'toolbar'):
+            print("self.toolbar existe:", self.toolbar)
+            for button in self.toolbar.findChildren(DragButton):
+                button.setCanvas(self.canvas)
+        else:
+            print("ERRO: self.toolbar não existe!")
+            # Tentar encontrar a toolbar com outro nome
+            for attr_name in dir(self):
+                attr = getattr(self, attr_name)
+                if isinstance(attr, QWidget) and attr_name != 'canvas':
+                    print(f"Possível toolbar encontrada: {attr_name}")            
+
+        # self.connection_button.clicked.connect(lambda: self.canvas.setMode("connection"))
+        # self.select_button.clicked.connect(lambda: self.canvas.setMode("select"))
+        # self.create_button.clicked.connect(lambda: self.canvas.setMode("create"))
+
+
         print("Inicializando UI...")
         print("Número de widgets no splitter:", splitter.count())  # Deve ser 3
         print("Menu bar visível?", self.menuBar().isVisible())  # Deve ser True
@@ -146,6 +225,17 @@ class BPMNEditor(QMainWindow):
         view_menu = self.menuBar().addMenu("&Ver")
         view_menu.addAction(self.zoom_in_action)
         view_menu.addAction(self.zoom_out_action)
+
+    def on_selection_changed(self):
+        selected = self.canvas.selectedItems()
+        
+        if len(selected) == 1 and isinstance(selected[0], BPMNElement):
+            self.actions_panel.load_element(selected[0])
+            self.splitter.handle(1).setEnabled(True)  # Permite redimensionar
+            self.splitter.setSizes([300, 200])       # Mostra painel
+        else:
+            self.splitter.handle(1).setEnabled(False) # Bloqueia alça
+            self.splitter.setSizes([300, 0])          # Esconde suavemente
 
     def create_actions(self):
         # Ação Novo Diagrama
@@ -206,13 +296,16 @@ class BPMNEditor(QMainWindow):
         toolbar.addAction(self.open_action)
         toolbar.addAction(self.save_action)  # ← Agora visível na UI
 
-    def autoSave(self):
-        if self.current_file:
-            try:
-                self.save_model()
-                self.statusBar().showMessage(f"Autosalvo em {datetime.now().strftime('%H:%M')}", 2000)
-            except Exception as e:
-                logging.error(f"Autosalvo falhou: {str(e)}")
+    def autoSave(self):  # <-- ATENÇÃO À INDENTAÇÃO!
+        try:
+            if hasattr(self, 'current_file') and self.current_file:
+                self.saveToFile(self.current_file)
+            else:
+                self.saveAs()  # Garanta que saveAs() existe!
+            
+            print(f"Autosave: {datetime.now().strftime('%H:%M:%S')}")  # Debug
+        except Exception as e:
+            QMessageBox.critical(self, "Erro", f"Autosave falhou:\n{str(e)}")
 
     def setWindowModifiedFlag(self, modified):
         title = "Editor BPMN" + ("*" if modified else "")
@@ -248,7 +341,7 @@ class BPMNEditor(QMainWindow):
     def on_element_selected(self):
         selected = self.canvas.scene.selectedItems()
         if selected:
-            self.properties.update_properties(selected[0])
+            item = selected[0]
 
     # ... manter métodos existentes de save/open/export ...
     def save_diagram(self):
@@ -470,10 +563,22 @@ class BPMNEditor(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Erro", f"Falha ao carregar:\n{str(e)}")
 
-    def delete_selected(self):
-        if hasattr(self, 'canvas'):
-            self.canvas.delete_selected_elements()
+    def setup_actions(self):
+        # ... outras ações
+        delete_action = QAction("Excluir Seleção", self)
+        delete_action.triggered.connect(self.delete_selected)
+        self.addAction(delete_action)
 
+    def delete_selected(self):
+        """Remove conexões e elementos selecionados"""
+        for item in self.canvas.scene().selectedItems():
+            if isinstance(item, BPMNConnection):
+                self.canvas.remove_connection(item)
+                logging.info(f"Conexão {item.id} removida")
+            elif isinstance(item, BPMNElement):
+                self.canvas.remove_element(item)
+        
+        self.canvas.scene().update()
 
 # Adicione no final do arquivo:
 if __name__ == "__main__":
